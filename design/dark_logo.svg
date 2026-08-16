@@ -1,0 +1,34 @@
+<svg width="256" height="320" viewBox="0 0 256 320" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF7A47"/>
+      <stop offset="100%" stop-color="#EF4A56"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+
+  <path d="M 56 172
+           L 96 172
+           L 118 128
+           L 138 196
+           L 160 84
+           L 182 140
+           L 200 140"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="16"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <circle cx="160" cy="84" r="11" fill="#FFFFFF"/>
+
+  <!-- Light text for dark backgrounds -->
+  <text x="128" y="300"
+        font-family="Helvetica, Arial, sans-serif"
+        font-size="34"
+        font-weight="700"
+        fill="#F5F5F5"
+        text-anchor="middle"
+        letter-spacing="1">Workouts</text>
+</svg>

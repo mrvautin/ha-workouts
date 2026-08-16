@@ -1,0 +1,5 @@
+homeassistant>=2024.6.0
+garminconnect==0.2.24
+ruff
+pytest
+pytest-homeassistant-custom-component

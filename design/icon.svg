@@ -1,0 +1,29 @@
+<svg width="256" height="256" viewBox="0 0 256 256" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FF6B35"/>
+      <stop offset="100%" stop-color="#E63946"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Rounded square badge -->
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="url(#bg)"/>
+
+  <!-- Activity / pulse trend line: three rising bars implied by a single stroke,
+       reads as "progress" without being a literal figure -->
+  <path d="M 56 172
+           L 96 172
+           L 118 128
+           L 138 196
+           L 160 84
+           L 182 140
+           L 200 140"
+        fill="none"
+        stroke="#FFFFFF"
+        stroke-width="16"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+
+  <!-- Small dot accent at the peak, like a data point / GPS ping -->
+  <circle cx="160" cy="84" r="11" fill="#FFFFFF"/>
+</svg>

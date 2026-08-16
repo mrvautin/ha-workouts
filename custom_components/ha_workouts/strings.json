@@ -1,0 +1,85 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Add a data source",
+        "description": "Choose which service to pull workout data from. You can add Garmin, Strava, Apple Health, or any combination, by running this setup again.",
+        "data": {
+          "source_type": "Source"
+        }
+      },
+      "garmin": {
+        "title": "Connect to Garmin Connect",
+        "description": "Enter your Garmin Connect account credentials. These are used only to authenticate with Garmin's servers and are stored locally in Home Assistant.",
+        "data": {
+          "email": "Email",
+          "password": "Password"
+        }
+      },
+      "pick_implementation": {
+        "title": "Connect to Strava",
+        "description": "**Strava now requires a paid Strava subscription ($11.99/mo) on the account that owns the API application**, since their June 2026 developer program change — this is Strava's policy, not something this integration can work around. If the account you register the app with doesn't have an active subscription, Strava will show the app as \"Inactive\" and reject API requests with a 403 error, even though sign-in itself succeeds.\n\nSetup (requires your own free-to-register, but subscription-gated, API application — this integration never uses a shared/bundled key):\n\n1. Go to [strava.com/settings/api](https://www.strava.com/settings/api) and create an API application (any name/website works, e.g. \"My Home Assistant\").\n2. Set **Authorization Callback Domain** to your Home Assistant's domain (e.g. `homeassistant.local` or your external hostname, without `https://` or a path).\n3. Copy the **Client ID** and **Client Secret** shown on that page.\n4. In Home Assistant, go to **Settings → Devices & Services → Application Credentials**, add a new entry for `ha_workouts` / Strava, and paste in the Client ID and Secret.\n5. Come back here and continue — you'll be redirected to Strava to authorize access."
+      },
+      "backfill": {
+        "title": "Import history",
+        "description": "How far back should we import your activity history? This runs in the background after setup and can be extended later from Configure.",
+        "data": {
+          "backfill_days": "History to import"
+        }
+      },
+      "apple_health": {
+        "title": "Connect Apple Health",
+        "description": "Apple doesn't offer a cloud API for Health data, so this works by receiving workouts pushed from your iPhone instead of pulling them — there's no historical import, only workouts recorded from now on.\n\n**Your webhook URL:**\n`{webhook_url}`\n\nSet up an iOS Shortcut to send workouts here:\n\n1. Install [Toolbox Pro](https://apps.apple.com/app/id1476205977) — stock Shortcuts can't read structured workout data, only raw daily totals, so a Toolbox Pro's **Get Workouts** action is needed to get real per-workout records (type, distance, duration, calories).\n2. Create a new Shortcut: **Get Workouts** → for each result, build a dictionary with keys `id`, `type`, `startDate`, `endDate`, `duration` (minutes), `distance` (with unit, e.g. \"11.4 km\"), `calories` (with unit, e.g. \"724 kcal\") → **Get Contents of URL**, method POST, the URL above, request body = that dictionary as JSON.\n3. Set it to run automatically — e.g. a Shortcuts **Automation** (Time of Day, or when a workout ends) with \"Ask Before Running\" turned off.\n4. Continue below once you're ready — the entity will start reporting once the first workout is pushed."
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid email or password.",
+      "cannot_connect": "Could not connect to Garmin Connect. Please try again.",
+      "unknown": "Unexpected error."
+    },
+    "abort": {
+      "already_configured": "This account is already configured.",
+      "missing_credentials": "You need to add Strava Client ID/Secret under Settings → Devices & Services → Application Credentials first. See strava.com/settings/api to create them.",
+      "oauth_failed": "Could not verify your Strava account after authorization. Please try again.",
+      "oauth_scope_missing": "Strava rejected the request with a 403 right after authorizing, with status \"Inactive\" on your API application. As of Strava's June 2026 developer program change, this almost always means the Strava account that owns your API application (at strava.com/settings/api) doesn't have an active paid Strava subscription — API access now requires one. Subscribe on that account, reactivate the app on the API settings page, then try again. (If you do have a subscription and still see this, it can also mean an older, narrower permission grant from a previous attempt was reused — try again and check that all requested permissions are ticked on Strava's consent screen.)",
+      "oauth_timeout": "Timed out waiting for Strava's authorization response.",
+      "oauth_unauthorized": "Strava rejected the authorization request.",
+      "user_rejected_authorize": "Authorization was cancelled."
+    },
+    "create_entry": {
+      "default": "Successfully connected."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "History import depth",
+        "description": "Increasing this will fetch and import the additional older history in the background. It will not re-import days already covered.",
+        "data": {
+          "backfill_days": "History to import"
+        }
+      },
+      "apple_health_webhook": {
+        "title": "Apple Health webhook URL",
+        "description": "**Your webhook URL:**\n`{webhook_url}`\n\nUse this if you need to set up the Shortcut again — e.g. on a new phone, or if you've lost the original URL. See the README for the full Shortcut setup steps."
+      }
+    }
+  },
+  "entity": {
+    "sensor": {
+      "steps": { "name": "Steps" },
+      "resting_heart_rate": { "name": "Resting heart rate" },
+      "active_calories": { "name": "Active calories" },
+      "floors_climbed": { "name": "Floors climbed" },
+      "stress_avg": { "name": "Average stress" },
+      "body_battery_max": { "name": "Body battery (max)" },
+      "last_activity_name": { "name": "Last activity" },
+      "last_activity_type": { "name": "Last activity type" },
+      "last_activity_duration": { "name": "Last activity duration" },
+      "activity_duration_minutes": { "name": "{activity_type} total duration" },
+      "activity_calories": { "name": "{activity_type} total calories" },
+      "activity_distance_km": { "name": "{activity_type} total distance" },
+      "backfill_status": { "name": "History import status" }
+    }
+  }
+}

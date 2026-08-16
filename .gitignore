@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.vscode/
+.DS_Store
+*.egg-info/
+
+# Home Assistant dev instance runtime state (keep configuration.yaml)
+dev/config/*
+!dev/config/configuration.yaml
+
+.claude/
+

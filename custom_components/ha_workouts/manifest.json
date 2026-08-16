@@ -1,0 +1,12 @@
+{
+  "domain": "ha_workouts",
+  "name": "HA Workouts",
+  "codeowners": ["@mrvautin"],
+  "config_flow": true,
+  "dependencies": ["application_credentials"],
+  "documentation": "https://github.com/mrvautin/ha-workouts",
+  "issue_tracker": "https://github.com/mrvautin/ha-workouts/issues",
+  "iot_class": "cloud_polling",
+  "requirements": ["garminconnect==0.2.24"],
+  "version": "0.2.0"
+}
