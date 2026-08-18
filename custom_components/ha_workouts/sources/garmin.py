@@ -48,10 +48,18 @@ def _map_activity_type(garmin_type: str | None) -> ActivityType:
 
 
 def _parse_garmin_datetime(value: str | None) -> datetime:
-    """Parse Garmin's 'YYYY-MM-DD HH:MM:SS' local-time strings into a naive datetime."""
+    """Parse Garmin's 'YYYY-MM-DD HH:MM:SS' local-time strings into a naive datetime.
+
+    Deliberately naive: Garmin's API returns this in the account's local time
+    with no offset, and we have no way to know what timezone that is from the
+    string alone (guessing UTC would be actively wrong, not just imprecise).
+    Only .date() is ever read from this downstream (see
+    sensor.py/statistics_import.py), so the missing tzinfo doesn't affect
+    correctness there.
+    """
     if not value:
-        return datetime.min
-    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")
+        return datetime.min  # noqa: DTZ901
+    return datetime.strptime(value, "%Y-%m-%d %H:%M:%S")  # noqa: DTZ007
 
 
 class GarminSource(WorkoutSource):

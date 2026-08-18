@@ -3,10 +3,10 @@
   "name": "HA Workouts",
   "codeowners": ["@mrvautin"],
   "config_flow": true,
-  "dependencies": ["application_credentials"],
+  "dependencies": ["application_credentials", "recorder"],
   "documentation": "https://github.com/mrvautin/ha-workouts",
-  "issue_tracker": "https://github.com/mrvautin/ha-workouts/issues",
   "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/mrvautin/ha-workouts/issues",
   "requirements": ["garminconnect==0.2.24"],
   "version": "0.2.0"
 }

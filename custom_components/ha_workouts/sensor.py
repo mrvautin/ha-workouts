@@ -37,6 +37,7 @@ from .statistics_import import (
     async_apply_activity_deltas,
     async_backfill_activity_statistics,
     entity_id_slug,
+    statistic_id_slug,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -171,12 +172,15 @@ def _build_activity_type_sensors() -> tuple[CumulativeSensorDescription, ...]:
     """One duration + calories sensor per ActivityType, plus distance for types that have it.
 
     Deliberately no state_class here (nor on CumulativeActivitySensor itself) —
-    see that class's docstring for why setting one causes HA's recorder to
-    auto-compile a second, competing statistics sequence for the same
-    statistic_id, alongside this integration's own explicit async_import_statistics
-    writes. NOTE: SensorEntity resolves state_class from either _attr_state_class
-    OR entity_description.state_class — omitting it from the entity class alone
-    is NOT sufficient, it must also be absent here.
+    see that class's docstring for why. This entity is a live display only;
+    its actual long-term statistics live under a separate external
+    statistic_id (see statistics_import.py's statistic_id_slug), so there's
+    nothing for state_class to usefully drive here — setting it would only
+    make HA's recorder auto-compile a second, unused statistics sequence under
+    this entity's own statistic_id. NOTE: SensorEntity resolves state_class
+    from either _attr_state_class OR entity_description.state_class — omitting
+    it from the entity class alone is NOT sufficient, it must also be absent
+    here.
     """
     descriptions: list[CumulativeSensorDescription] = []
     for activity_type in ActivityType:
@@ -247,6 +251,9 @@ async def async_setup_entry(
                 explicit_entity_id=entity_id_slug(
                     entry_slug, description.activity_type, description.metric
                 ),
+                statistic_id=statistic_id_slug(
+                    entry_slug, description.activity_type, description.metric
+                ),
             )
             for description in ACTIVITY_TYPE_SENSORS
         ]
@@ -303,8 +310,6 @@ class WorkoutSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntit
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         if explicit_entity_id is not None:
-            # Must match statistics_import.entity_id_slug exactly so backfilled
-            # long-term statistics attach to this entity.
             self.entity_id = explicit_entity_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
@@ -335,19 +340,20 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
     work correctly for Apple Health's webhook delivery (can arrive hours after the
     workout's real date) as well as Garmin/Strava's same-day polling.
 
-    Deliberately does NOT set state_class. HA's recorder auto-compiles its own
-    long-term statistics for any state_class=total/total_increasing sensor, driven
-    by the live entity's state history — completely independently of, and in
-    direct conflict with, the statistics this integration writes explicitly via
-    async_import_statistics (both the historical backfill and this entity's own
-    live updates below). Two independent writers targeting the same statistic_id
-    each maintain their own competing cumulative sum, which surfaced as a real,
-    hard-to-diagnose bug: sum and the entity's state diverging by a fixed offset
-    (the recorder's self-chosen "zero point", re-established fresh on every HA
-    restart) — visible as a large, spurious spike in Statistics Graph cards at
-    the point the two sequences forked. Every statistics write for this entity
-    must go through async_apply_activity_deltas/the backfill functions —
-    never through state_class-driven auto-compile.
+    This entity's own statistic_id (self.entity_id) carries no long-term
+    statistics at all — self._statistic_id, a separate EXTERNAL statistic_id
+    (see statistics_import.py's statistic_id_slug and module docstring for why),
+    is what Statistics Graph cards should point at, and what
+    async_apply_activity_deltas/the backfill functions write to. This entity
+    exists purely to show the live running total as a normal display value.
+
+    Deliberately does NOT set state_class: since the statistic_id above is used
+    for nothing, there's nothing for state_class to usefully enable, and it
+    would only make HA's recorder auto-compile a second, unused statistics
+    sequence under this entity's own statistic_id. Every statistics write for
+    this integration must go through async_apply_activity_deltas/the backfill
+    functions, targeting the external statistic_id — never state_class-driven
+    auto-compile of the entity's own.
     """
 
     entity_description: CumulativeSensorDescription
@@ -359,13 +365,16 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
         entry: ConfigEntry,
         description: CumulativeSensorDescription,
         explicit_entity_id: str,
+        statistic_id: str,
     ) -> None:
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        # Must match statistics_import.entity_id_slug exactly so backfilled
-        # long-term statistics attach to this entity.
         self.entity_id = explicit_entity_id
+        # The external statistic_id (statistics_import.statistic_id_slug) that
+        # actually holds this sensor's long-term history — deliberately NOT
+        # self.entity_id, see class docstring for why.
+        self._statistic_id = statistic_id
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
@@ -400,8 +409,8 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
 
     async def _async_seed_from_statistics(self) -> float | None:
         def _query() -> float | None:
-            rows = get_last_statistics(self.hass, 1, self.entity_id, False, {"sum"})
-            series = rows.get(self.entity_id)
+            rows = get_last_statistics(self.hass, 1, self._statistic_id, False, {"sum"})
+            series = rows.get(self._statistic_id)
             if not series:
                 return None
             return series[0]["sum"] or 0.0
@@ -429,7 +438,7 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
                 self.hass.async_create_task(
                     async_apply_activity_deltas(
                         self.hass,
-                        self.entity_id,
+                        self._statistic_id,
                         self.entity_description.activity_type,
                         self.entity_description.metric,
                         deltas_by_day,

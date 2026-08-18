@@ -16,12 +16,12 @@ import voluptuous as vol
 from homeassistant.components import webhook
 from homeassistant.config_entries import (
     ConfigEntry,
-    ConfigFlow,
     ConfigFlowResult,
     OptionsFlow,
 )
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD
 from homeassistant.core import callback
+from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -167,10 +167,38 @@ class HaWorkoutsConfigFlow(
         return self.async_show_form(
             step_id="apple_health",
             data_schema=vol.Schema({}),
-            description_placeholders={"webhook_url": webhook_url},
+            description_placeholders={
+                "webhook_url": webhook_url,
+                "toolbox_pro_url": "[Toolbox Pro](https://apps.apple.com/app/id1476205977)",
+            },
         )
 
     # --- Strava: OAuth2, picks up after AbstractOAuth2FlowHandler's dance --
+
+    async def async_step_pick_implementation(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Override purely to inject description_placeholders.
+
+        AbstractOAuth2FlowHandler's own version of this step (which this calls
+        into via super()) renders the "pick_implementation" form without any
+        placeholders — hassfest forbids literal URLs baked into strings.json,
+        so the Strava setup link has to arrive as a placeholder instead. With
+        only one Application Credentials implementation registered (the normal
+        case here), the base class actually skips this form entirely and goes
+        straight to async_step_auth — but hassfest validates strings.json
+        statically regardless of whether the form is ever shown at runtime, so
+        the placeholder still has to be supplied here.
+        """
+        result = await super().async_step_pick_implementation(user_input)
+        if (
+            result.get("type") == FlowResultType.FORM
+            and result.get("step_id") == "pick_implementation"
+        ):
+            result["description_placeholders"] = {
+                "strava_api_url": "[strava.com/settings/api](https://www.strava.com/settings/api)",
+            }
+        return result
 
     async def async_oauth_create_entry(self, data: dict[str, Any]) -> ConfigFlowResult:
         """Called by AbstractOAuth2FlowHandler once the OAuth2 token exchange succeeds.

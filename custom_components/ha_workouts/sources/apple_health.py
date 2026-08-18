@@ -144,7 +144,13 @@ def _parse_apple_datetime(value: str | None) -> datetime | None:
     normalized = value.replace(" ", " ").strip()
     for fmt in ("%d %b %Y at %I:%M %p", "%d %B %Y at %I:%M %p"):
         try:
-            return datetime.strptime(normalized, fmt)
+            # Deliberately naive: Shortcuts sends the phone's local wall-clock
+            # time with no offset, and we have no way to know what timezone
+            # that is from the string alone (guessing UTC would be actively
+            # wrong, not just imprecise). Only .date() is ever read from this
+            # downstream (see sensor.py/statistics_import.py), so the missing
+            # tzinfo doesn't affect correctness there.
+            return datetime.strptime(normalized, fmt)  # noqa: DTZ007
         except ValueError:
             continue
     _LOGGER.warning("Could not parse Apple Health date %r", value)

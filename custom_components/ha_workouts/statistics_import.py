@@ -1,9 +1,34 @@
 """Backfills per-activity-type long-term statistics from historical activity data.
 
 Imports lifetime-cumulative running totals (distance/duration/calories per
-ActivityType, never resetting) into HA's recorder statistics tables via
-async_import_statistics, so Statistics Graph cards have useful history immediately
-after setup instead of growing from zero.
+ActivityType, never resetting) into HA's recorder statistics tables as EXTERNAL
+statistics (statistic_id like "ha_workouts:garmin_running_distance_km", source=
+DOMAIN) via async_add_external_statistics — the same mechanism the Energy
+dashboard uses for non-entity data sources — so Statistics Graph cards have
+useful history immediately after setup instead of growing from zero.
+
+External, rather than entity-attached (sensor.*) statistics, is a deliberate
+choice, not the original design: an entity-attached statistic_id is expected by
+HA's recorder to be driven by that entity's own state_class (see
+homeassistant/components/sensor/recorder.py's compile_statistics), which
+auto-compiles its OWN competing sum from live state history the moment
+state_class is set — independently of, and inconsistent with, statistics we
+import ourselves. Leaving state_class unset avoids that auto-compile, but then
+trips a *different* built-in mechanism: sensor/recorder.py's
+update_statistics_issues creates a permanent "entity no longer has a state
+class" repair notice for any sensor.* statistic_id that still has metadata with
+source="recorder" but no live state_class — which is unavoidable for us, since
+async_import_statistics requires source to equal "recorder" for any
+entity-shaped statistic_id. There's no supported way to have both a
+state_class-free entity AND a clean repair-free entity-attached statistic.
+External statistics sidestep this entirely: HA's compile_statistics and the
+repair check both only ever look at real sensor.* entity states, so a
+colon-separated statistic_id is invisible to both, permanently — see
+homeassistant/components/kitchen_sink/__init__.py's own use of this same
+pattern (energy_consumption_kwh, gas_consumption_m3, etc.) for the sanctioned
+precedent. The sensor.* entity itself (see sensor.py's CumulativeActivitySensor)
+still exists and shows the live running total, but carries no statistics of its
+own — statistic_id_slug() below is what backs the actual chartable history.
 
 IMPORTANT: `sum` must be genuinely cumulative-forever, not a per-day or per-period
 total. HA's Statistics Graph card computes both its "Sum" and "Change" stat types
@@ -62,13 +87,14 @@ from homeassistant.components.recorder.models import (
     StatisticMetaData,
 )
 from homeassistant.components.recorder.statistics import (
-    async_import_statistics,
+    async_add_external_statistics,
     get_last_statistics,
     statistics_during_period,
 )
 from homeassistant.core import HomeAssistant
 from homeassistant.util import dt as dt_util
 
+from .const import DOMAIN
 from .models import Activity, ActivityType
 from .sources.base import WorkoutSource, WorkoutSourceRateLimitedError
 
@@ -96,12 +122,22 @@ _RATE_LIMIT_RETRY_DELAYS = (60, 300, 900)  # 1 min, 5 min, 15 min
 
 
 def entity_id_slug(entry_slug: str, activity_type: ActivityType, metric: str) -> str:
-    """Build the sensor entity_id shared by the live sensor and the statistics backfill.
+    """Build the entity_id for a per-activity-type live sensor.
 
-    Both sides must compute this identically, or imported history won't attach to
-    the live entity that starts reporting today's state.
+    Purely a display entity now — see module docstring. Its entity_id is
+    otherwise unrelated to where its statistics are stored (statistic_id_slug).
     """
     return f"sensor.{entry_slug}_{activity_type.value}_{metric}"
+
+
+def statistic_id_slug(entry_slug: str, activity_type: ActivityType, metric: str) -> str:
+    """Build the external statistic_id backing a per-activity-type sensor's history.
+
+    Deliberately NOT entity-shaped (see module docstring for why): this is what
+    both the backfill and the live sensor's incremental updates read/write, and
+    what Statistics Graph cards should be pointed at for charting.
+    """
+    return f"{DOMAIN}:{entry_slug}_{activity_type.value}_{metric}"
 
 
 def _metrics_for(activity_type: ActivityType) -> list[str]:
@@ -155,7 +191,7 @@ async def async_backfill_activity_statistics(
     letting the coordinator's poll interleave between backfill chunks rather than
     being blocked for the run's full duration.
     """
-    today = date.today()
+    today = dt_util.now().date()
     end_day = today - timedelta(days=1)
     start_day = date(1970, 1, 1) if backfill_days == 0 else today - timedelta(days=backfill_days)
 
@@ -215,14 +251,14 @@ async def async_backfill_activity_statistics(
         for activity_type in ActivityType:
             day_buckets = by_type_and_day.get(activity_type, {})
             for metric in _metrics_for(activity_type):
-                statistic_id = entity_id_slug(entry_slug, activity_type, metric)
+                statistic_id = statistic_id_slug(entry_slug, activity_type, metric)
                 await _rewrite_metric_series(
                     hass, statistic_id, activity_type, metric, day_buckets, start_day, end_day
                 )
 
         progress.state = "complete"
         progress.notify()
-    except Exception as err:  # noqa: BLE001 - surfaced to the status sensor, not raised
+    except Exception as err:  # surfaced to the status sensor, not raised
         _LOGGER.exception("Backfill failed for %s", entry_slug)
         progress.state = "error"
         progress.error = str(err)
@@ -282,7 +318,7 @@ async def _range_fully_covered(
     previous run) means the range is not fully covered.
     """
     statistic_ids = {
-        entity_id_slug(entry_slug, activity_type, metric)
+        statistic_id_slug(entry_slug, activity_type, metric)
         for activity_type in ActivityType
         for metric in _metrics_for(activity_type)
     }
@@ -320,7 +356,7 @@ def _build_metric_metadata(
         mean_type=StatisticMeanType.NONE,
         has_sum=True,
         name=f"{activity_type.value.replace('_', ' ').title()} {metric.replace('_', ' ')}",
-        source="recorder",
+        source=DOMAIN,
         statistic_id=statistic_id,
         unit_class=unit_class,
         unit_of_measurement=unit,
@@ -339,10 +375,10 @@ async def _rewrite_metric_series(
     """Recompute and overwrite the entire [start_day, end_day] cumulative series.
 
     Deliberately does not try to anchor onto any existing data (see module
-    docstring for why): async_import_statistics upserts per-day rows, so writing
-    every day fresh from the just-fetched activities always produces one
-    self-consistent, genuinely monotonic series, whether or not a gap previously
-    existed anywhere in this range.
+    docstring for why): async_add_external_statistics upserts per-day rows, so
+    writing every day fresh from the just-fetched activities always produces
+    one self-consistent, genuinely monotonic series, whether or not a gap
+    previously existed anywhere in this range.
     """
     if start_day > end_day:
         return
@@ -366,18 +402,18 @@ async def _rewrite_metric_series(
         statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
         day += timedelta(days=1)
 
-    async_import_statistics(hass, metadata, statistic_data)
-    # async_import_statistics only QUEUES the write on the recorder's background
-    # thread — it returns immediately, before the row is actually committed. This
-    # was a real, repeatedly-hit bug: the backfill task would resolve as "done"
-    # (see async_backfill_activity_statistics) and immediately trigger creating
-    # the live CumulativeActivitySensor, whose seeding query
-    # (get_last_statistics, called from async_added_to_hass) would then run
-    # before this write had actually landed — finding nothing and seeding at 0,
-    # permanently disconnecting the live sensor's running total from the
-    # backfill's correct value. Waiting for the recorder to drain its queue here
-    # makes the write actually durable before this function (and therefore the
-    # backfill task) reports completion.
+    async_add_external_statistics(hass, metadata, statistic_data)
+    # async_add_external_statistics only QUEUES the write on the recorder's
+    # background thread — it returns immediately, before the row is actually
+    # committed. This was a real, repeatedly-hit bug: the backfill task would
+    # resolve as "done" (see async_backfill_activity_statistics) and
+    # immediately trigger creating the live CumulativeActivitySensor, whose
+    # seeding query (get_last_statistics, called from async_added_to_hass)
+    # would then run before this write had actually landed — finding nothing
+    # and seeding at 0, permanently disconnecting the live sensor's running
+    # total from the backfill's correct value. Waiting for the recorder to
+    # drain its queue here makes the write actually durable before this
+    # function (and therefore the backfill task) reports completion.
     await get_instance(hass).async_block_till_done()
     _LOGGER.debug(
         "Rewrote %d days of statistics for %s", len(statistic_data), statistic_id
@@ -395,9 +431,9 @@ async def async_apply_activity_deltas(
     activity's own real calendar date — not "now".
 
     This is the ONLY way live per-activity-type sensor updates should reach the
-    statistics table (see sensor.py's CumulativeActivitySensor, which does NOT
-    set state_class precisely so it never triggers HA's recorder's own automatic
-    statistics compilation for this entity — see historical note below).
+    statistics table. statistic_id here is always the EXTERNAL statistic_id
+    from statistic_id_slug() (e.g. "ha_workouts:garmin_running_distance_km"),
+    never the sensor.* entity_id itself — see module docstring for why.
 
     Keying by real date matters most for Apple Health: workouts arrive via
     webhook, in whatever order and however long after the fact the user's
@@ -411,8 +447,8 @@ async def async_apply_activity_deltas(
     _rewrite_metric_series; this function gives Apple Health the same "one row
     per real day" shape, incrementally, as each webhook delivery lands.
 
-    async_import_statistics can only overwrite a bucket's absolute sum, not
-    apply a relative delta, so inserting a delta on a past day requires
+    async_add_external_statistics can only overwrite a bucket's absolute sum,
+    not apply a relative delta, so inserting a delta on a past day requires
     re-stamping every day from that point forward with the shifted cumulative
     total — otherwise later days would still show their old (too-low) sum and
     the series would appear to dip back down the next day. This reads back each
@@ -420,20 +456,20 @@ async def async_apply_activity_deltas(
     the new deltas on top, and rewrites the whole [earliest affected day, today]
     tail as a fresh running total in one pass.
 
-    (Historical note: an even earlier version set state_class on this entity,
-    letting HA's recorder auto-compile its own statistics for the same
-    statistic_id independently of these writes — re-establishing its own "zero
-    point" from the live state on every HA restart. That produced two competing
-    sum sequences that diverged by a fixed offset, seen as a spurious spike in
-    Statistics Graph cards. Every statistics write for this entity must go
-    through this function or the backfill functions — never state_class-driven
-    auto-compile.)
+    (Historical note: an earlier version wrote to the sensor.* entity's own
+    statistic_id with state_class set, letting HA's recorder auto-compile its
+    own statistics for the same statistic_id independently of these writes —
+    re-establishing its own "zero point" from the live state on every HA
+    restart. That produced two competing sum sequences that diverged by a
+    fixed offset, seen as a spurious spike in Statistics Graph cards. Moving
+    to a separate external statistic_id — see module docstring — eliminates
+    the conflict at the source rather than working around it.)
     """
     if not deltas_by_day:
         return
 
     earliest_day = min(deltas_by_day)
-    today = date.today()
+    today = dt_util.now().date()
     # Enough raw rows to comfortably cover from the oldest affected day to today,
     # plus slack — this integration only ever writes at most one row per day.
     rows_needed = (today - earliest_day).days + 30
@@ -475,9 +511,10 @@ async def async_apply_activity_deltas(
         statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
         day += timedelta(days=1)
 
-    async_import_statistics(hass, metadata, statistic_data)
-    # See _rewrite_metric_series for why this wait matters: async_import_statistics
-    # only queues the write, it doesn't block until it's committed.
+    async_add_external_statistics(hass, metadata, statistic_data)
+    # See _rewrite_metric_series for why this wait matters:
+    # async_add_external_statistics only queues the write, it doesn't block
+    # until it's committed.
     await get_instance(hass).async_block_till_done()
 
 

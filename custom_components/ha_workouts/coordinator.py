@@ -3,11 +3,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import date
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.util import dt as dt_util
 
 from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
@@ -38,7 +38,7 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
     async def _async_update_data(self) -> WorkoutData:
         async with self.request_lock:
             try:
-                return await self.source.async_fetch(date.today())
+                return await self.source.async_fetch(dt_util.now().date())
             except WorkoutSourceAuthError as err:
                 raise UpdateFailed(f"Authentication failed: {err}") from err
             except WorkoutSourceError as err:
