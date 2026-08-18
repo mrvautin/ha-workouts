@@ -50,6 +50,7 @@ class DailySummary:
     body_battery_min: int | None = None
     active_calories: float | None = None
     floors_climbed: int | None = None
+    vo2_max: float | None = None
 
 
 @dataclass(slots=True)

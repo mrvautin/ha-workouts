@@ -73,6 +73,7 @@
       "floors_climbed": { "name": "Floors climbed" },
       "stress_avg": { "name": "Average stress" },
       "body_battery_max": { "name": "Body battery (max)" },
+      "vo2_max": { "name": "VO2 max" },
       "last_activity_name": { "name": "Last activity" },
       "last_activity_type": { "name": "Last activity type" },
       "last_activity_duration": { "name": "Last activity duration" },

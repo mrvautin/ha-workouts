@@ -101,6 +101,14 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
             data.daily_summary.body_battery_max if data.daily_summary else None
         ),
     ),
+    WorkoutSensorDescription(
+        key="vo2_max",
+        translation_key="vo2_max",
+        native_unit_of_measurement="mL/kg/min",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: data.daily_summary.vo2_max if data.daily_summary else None,
+    ),
 )
 
 #: "Last activity" sensors — meaningful for any source that reports activities

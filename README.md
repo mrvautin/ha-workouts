@@ -83,7 +83,7 @@ never uses a shared/bundled key:
 6. Continue the HA Workouts config flow — you'll be redirected to Strava to
    authorize access, then back here to finish setup.
 
-### Apple Health setup
+### Apple Health setup (needs paid app)
 
 Apple Health/HealthKit has no cloud API, so there's nothing to poll — instead,
 the integration generates a webhook URL during setup, and an iOS Shortcut on
@@ -93,7 +93,7 @@ your phone pushes each workout to it.
    webhook URL and shows it to you — copy it (you can view it again later from
    the integration's **Configure** option if you need it, e.g. for a second
    phone).
-2. Install [Toolbox Pro](https://apps.apple.com/app/id1476205977) on your
+2. Install [Toolbox Pro](https://apps.apple.com/app/id1476205977) (Paid App - Small amount) on your
    iPhone. Stock Shortcuts can only read raw daily quantity totals (e.g.
    "Walking + Running Distance"), which lump incidental walking in with real
    workouts and carry no per-session date — Toolbox Pro's **Get Workouts**
@@ -130,10 +130,12 @@ your phone pushes each workout to it.
 6. Optional - Create an automation to run every `x` days to run the shortcut to keep your data updated. Alternatively, create an automation to run the shortcut whenever you complete a workout.
 
 Get the workouts
-![Get the workouts](images/apple-shortcut.png)
+
+<img src="images/apple-shortcut.png" alt="Get the workouts" width="50%">
 
 Setting up the data (make sure all fields are `Text`)
-![Setting up the data](images/apple-shortcut1.png)
+
+<img src="images/apple-shortcut1.png" alt="Setting up the data" width="50%">
 
 ## Data exposed
 

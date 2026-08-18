@@ -47,6 +47,20 @@ def _map_activity_type(garmin_type: str | None) -> ActivityType:
     return _ACTIVITY_TYPE_MAP.get(garmin_type.lower(), ActivityType.OTHER)
 
 
+def _parse_vo2_max(max_metrics: list[dict[str, Any]] | None) -> float | None:
+    """Extract the running VO2 max estimate from get_max_metrics's response.
+
+    Garmin only recomputes this occasionally (not every day), so an empty
+    list/missing "generic" block for a given date is normal — it means no new
+    estimate that day, not an error. Prefers the precise value (e.g. 52.7)
+    over the rounded one (53.0) Garmin also provides.
+    """
+    if not max_metrics:
+        return None
+    generic = (max_metrics[0] or {}).get("generic") or {}
+    return generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
+
+
 def _parse_garmin_datetime(value: str | None) -> datetime:
     """Parse Garmin's 'YYYY-MM-DD HH:MM:SS' local-time strings into a naive datetime.
 
@@ -123,6 +137,9 @@ class GarminSource(WorkoutSource):
             raw_stats = await self._hass.async_add_executor_job(
                 self._client.get_stats, day_str
             )
+            raw_max_metrics = await self._hass.async_add_executor_job(
+                self._client.get_max_metrics, day_str
+            )
         except GarminConnectAuthenticationError as err:
             # Session expired; force a fresh login on the next refresh.
             self._client = None
@@ -133,7 +150,7 @@ class GarminSource(WorkoutSource):
             raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
 
         activities = [self._parse_activity(item) for item in raw_activities or []]
-        summary = self._parse_daily_summary(raw_stats, target_day)
+        summary = self._parse_daily_summary(raw_stats, target_day, raw_max_metrics)
 
         return WorkoutData(activities=activities, daily_summary=summary)
 
@@ -176,7 +193,12 @@ class GarminSource(WorkoutSource):
             name=item.get("activityName"),
         )
 
-    def _parse_daily_summary(self, stats: dict[str, Any], target_day: date) -> DailySummary:
+    def _parse_daily_summary(
+        self,
+        stats: dict[str, Any],
+        target_day: date,
+        max_metrics: list[dict[str, Any]] | None,
+    ) -> DailySummary:
         return DailySummary(
             source=self.key,
             day=target_day,
@@ -187,6 +209,7 @@ class GarminSource(WorkoutSource):
             stress_avg=stats.get("averageStressLevel"),
             body_battery_max=stats.get("bodyBatteryHighestValue"),
             body_battery_min=stats.get("bodyBatteryLowestValue"),
+            vo2_max=_parse_vo2_max(max_metrics),
         )
 
     @classmethod
