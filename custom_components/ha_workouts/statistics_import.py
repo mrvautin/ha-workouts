@@ -498,7 +498,18 @@ async def async_apply_activity_deltas(
 
     metadata = _build_metric_metadata(statistic_id, activity_type, metric)
     statistic_data: list[StatisticData] = []
-    running = existing_by_day.get(earliest_day - timedelta(days=1), 0.0)
+    # The live-write path only ever writes a row on a day that had a genuine
+    # delta — unlike the backfill, it does NOT guarantee a row exists for every
+    # single day (e.g. a rest day with no activity). So the day immediately
+    # before earliest_day frequently has no exact row even though real history
+    # exists further back — existing_by_day.get(earliest_day - 1 day, 0.0) was
+    # a real, repeatedly-hit bug: it silently fell back to 0.0 whenever the most
+    # recent prior write wasn't exactly yesterday, discarding the entire running
+    # total built up by every previous write and every backfilled day. The
+    # correct baseline is the latest row at or before earliest_day, whatever
+    # date it's actually stamped on — never a same-day-only lookup.
+    prior_days = [d for d in existing_by_day if d < earliest_day]
+    running = existing_by_day[max(prior_days)] if prior_days else 0.0
     day = earliest_day
     while day <= today:
         prior_total = existing_by_day.get(day - timedelta(days=1), running)
