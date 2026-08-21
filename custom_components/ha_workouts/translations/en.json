@@ -80,7 +80,8 @@
       "activity_duration_minutes": { "name": "{activity_type} total duration" },
       "activity_calories": { "name": "{activity_type} total calories" },
       "activity_distance_km": { "name": "{activity_type} total distance" },
-      "backfill_status": { "name": "History import status" }
+      "backfill_status": { "name": "History import status" },
+      "last_updated": { "name": "Last updated" }
     }
   }
 }

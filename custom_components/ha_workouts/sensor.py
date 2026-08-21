@@ -248,6 +248,7 @@ async def async_setup_entry(
         WorkoutSensor(coordinator, entry, description) for description in summary_descriptions
     ]
     entities.append(BackfillStatusSensor(coordinator, entry))
+    entities.append(LastUpdatedSensor(coordinator, entry))
     async_add_entities(entities)
 
     def _add_activity_type_sensors(_task: object | None = None) -> None:
@@ -511,3 +512,30 @@ class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sens
             "days_imported_this_run": progress.days_imported_this_run,
             "error": progress.error,
         }
+
+
+class LastUpdatedSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
+    """Reports when data was last actually fetched from the source.
+
+    Works the same way for all three sources: Garmin/Strava's periodic poll and
+    Apple Health's webhook-triggered refresh both update
+    coordinator.last_data_update (see coordinator.py), so this entity doesn't
+    need to know which kind of source it's attached to.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "last_updated"
+    _attr_device_class = SensorDeviceClass.TIMESTAMP
+
+    def __init__(self, coordinator: WorkoutDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_last_updated"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=coordinator.source.key.capitalize(),
+        )
+
+    @property
+    def native_value(self) -> object | None:
+        return self.coordinator.last_data_update
