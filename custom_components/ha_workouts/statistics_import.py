@@ -92,6 +92,7 @@ from homeassistant.components.recorder.statistics import (
     statistics_during_period,
 )
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
 from .const import DOMAIN
@@ -119,6 +120,54 @@ _CHUNK_DAYS = 90
 # If the source still rate-limits us despite the pacing above, back off and
 # retry rather than aborting a multi-year import over one transient 429.
 _RATE_LIMIT_RETRY_DELAYS = (60, 300, 900)  # 1 min, 5 min, 15 min
+
+# Serializes async_apply_activity_deltas calls per statistic_id. Each call reads
+# the latest stored sum, computes a new running total, then writes it back —
+# a classic read-modify-write race if two calls for the SAME statistic_id ever
+# overlap (observed in production: HA startup can fire a CumulativeActivitySensor's
+# coordinator listener more than once in quick succession — e.g. its own explicit
+# post-seed call plus a coordinator refresh scheduled by listener registration —
+# each spawning an unawaited hass.async_create_task(async_apply_activity_deltas(...))
+# for the same statistic_id). Without this lock, both calls read the same
+# baseline before either writes, so the same day's activity gets added to the
+# running total twice — a real, confirmed double-count bug, not hypothetical.
+# A plain dict (not weak-keyed) is fine: the number of distinct statistic_ids is
+# small and fixed per config entry, so this never grows unbounded.
+_statistic_write_locks: dict[str, asyncio.Lock] = {}
+
+
+def _lock_for(statistic_id: str) -> asyncio.Lock:
+    lock = _statistic_write_locks.get(statistic_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _statistic_write_locks[statistic_id] = lock
+    return lock
+
+
+# Persisted, cross-instance record of which activity source_ids have already
+# had their delta applied to each statistic_id. The lock above only prevents
+# two writes for the same statistic_id from corrupting each other's read — it
+# does NOT stop the same activity's delta being added twice if it's genuinely
+# presented to async_apply_activity_deltas more than once (e.g. by two
+# separately-constructed CumulativeActivitySensor instances for the same
+# statistic_id, each with their own independent in-memory
+# _counted_source_ids, coexisting briefly if HA runs async_setup_entry more
+# than once for a slow-starting config entry — observed in production via a
+# "Setup timed out for bootstrap" warning with multiple concurrent
+# async_apply_activity_deltas tasks pending for the same statistic). Each
+# entity's own _counted_source_ids remains the fast-path check to avoid
+# calling this function at all for activities it's already seen locally; this
+# store is the durable backstop that makes a genuine double-call a no-op
+# regardless of what caused it. Keyed by statistic_id (not shared across
+# metrics) since each metric's write is independent.
+_STORAGE_VERSION = 1
+
+
+def _applied_source_ids_store(hass: HomeAssistant, statistic_id: str) -> Store[list[str]]:
+    # statistic_id already only contains slug-safe characters (see
+    # statistic_id_slug) other than ":", which Store's key must not contain.
+    key = f"ha_workouts_applied_source_ids_{statistic_id.replace(':', '_')}"
+    return Store(hass, _STORAGE_VERSION, key)
 
 
 def entity_id_slug(entry_slug: str, activity_type: ActivityType, metric: str) -> str:
@@ -425,7 +474,7 @@ async def async_apply_activity_deltas(
     statistic_id: str,
     activity_type: ActivityType,
     metric: str,
-    deltas_by_day: dict[date, float],
+    deltas_by_day: dict[date, list[tuple[str, float]]],
 ) -> None:
     """Fold newly-seen activities into the statistics series, keyed by each
     activity's own real calendar date — not "now".
@@ -434,6 +483,21 @@ async def async_apply_activity_deltas(
     statistics table. statistic_id here is always the EXTERNAL statistic_id
     from statistic_id_slug() (e.g. "ha_workouts:garmin_running_distance_km"),
     never the sensor.* entity_id itself — see module docstring for why.
+
+    deltas_by_day maps each day to a list of (Activity.source_id, value) pairs
+    rather than a single pre-summed float — each entry is individually checked
+    against a persisted "already applied" ledger (see
+    _applied_source_ids_store) before being folded into that day's total. This
+    is what makes the whole call idempotent: calling it twice with the exact
+    same activities is a safe no-op the second time, which matters because the
+    caller's own dedup (CumulativeActivitySensor._counted_source_ids) is
+    per-entity-instance, in-memory state — it can't protect against two
+    separate entity instances for the same statistic_id both believing the
+    same activity is new (observed in production: HA can run
+    async_setup_entry more than once for a slow-starting config entry,
+    producing two CumulativeActivitySensor instances that each independently
+    scheduled an async_apply_activity_deltas call for the same activity,
+    double-counting its distance).
 
     Keying by real date matters most for Apple Health: workouts arrive via
     webhook, in whatever order and however long after the fact the user's
@@ -468,65 +532,105 @@ async def async_apply_activity_deltas(
     if not deltas_by_day:
         return
 
-    earliest_day = min(deltas_by_day)
-    today = dt_util.now().date()
-    # Enough raw rows to comfortably cover from the oldest affected day to today,
-    # plus slack — this integration only ever writes at most one row per day.
-    rows_needed = (today - earliest_day).days + 30
+    # See _lock_for's docstring: this makes the read-modify-write below atomic
+    # per statistic_id, so two overlapping calls for the same statistic_id
+    # (e.g. from a coordinator listener firing more than once in quick
+    # succession at startup) can't both read the same stale baseline and each
+    # add their delta on top of it — a real, confirmed double-count bug.
+    async with _lock_for(statistic_id):
+        store = _applied_source_ids_store(hass, statistic_id)
+        already_applied: set[str] = set(await store.async_load() or [])
 
-    def _query_existing() -> dict[date, float]:
-        # Deliberately NOT statistics_during_period(..., period="day", ...): that
-        # reduces/re-labels rows onto LOCAL-timezone day boundaries, whereas every
-        # row this integration writes is stamped at noon UTC (see
-        # _rewrite_metric_series). Converting a local-midnight-labeled boundary
-        # back to a UTC date with .date() silently shifts the day by one whenever
-        # the local UTC offset is non-zero (e.g. Australia/Adelaide, UTC+9:30) —
-        # this was a real bug: it mapped 15 Aug's row to "14 Aug" and made a new
-        # activity look like it landed on a day with no prior total, overwriting
-        # the whole series' running total back down to just that day's delta.
-        # get_last_statistics returns raw, unreduced rows, so the noon-UTC
-        # timestamp we ourselves wrote round-trips through .date() safely for any
-        # real-world UTC offset.
-        rows = get_last_statistics(hass, rows_needed, statistic_id, False, {"sum"})
-        series = rows.get(statistic_id, [])
-        return {
-            dt_util.utc_from_timestamp(row["start"]).date(): row["sum"] or 0.0
-            for row in series
-        }
+        # Filter out any (source_id, value) pair already recorded as applied —
+        # see the docstring above for why this de-dup can't rely solely on the
+        # caller's in-memory tracking.
+        deduped_by_day: dict[date, float] = {}
+        newly_applied: list[str] = []
+        for day, entries in deltas_by_day.items():
+            day_total = 0.0
+            for source_id, value in entries:
+                if source_id in already_applied:
+                    continue
+                day_total += value
+                newly_applied.append(source_id)
+            if day_total:
+                deduped_by_day[day] = day_total
 
-    existing_by_day = await get_instance(hass).async_add_executor_job(_query_existing)
+        if not deduped_by_day:
+            return
 
-    metadata = _build_metric_metadata(statistic_id, activity_type, metric)
-    statistic_data: list[StatisticData] = []
-    # The live-write path only ever writes a row on a day that had a genuine
-    # delta — unlike the backfill, it does NOT guarantee a row exists for every
-    # single day (e.g. a rest day with no activity). So the day immediately
-    # before earliest_day frequently has no exact row even though real history
-    # exists further back — existing_by_day.get(earliest_day - 1 day, 0.0) was
-    # a real, repeatedly-hit bug: it silently fell back to 0.0 whenever the most
-    # recent prior write wasn't exactly yesterday, discarding the entire running
-    # total built up by every previous write and every backfilled day. The
-    # correct baseline is the latest row at or before earliest_day, whatever
-    # date it's actually stamped on — never a same-day-only lookup.
-    prior_days = [d for d in existing_by_day if d < earliest_day]
-    running = existing_by_day[max(prior_days)] if prior_days else 0.0
-    day = earliest_day
-    while day <= today:
-        prior_total = existing_by_day.get(day - timedelta(days=1), running)
-        day_own_total = existing_by_day.get(day, prior_total)
-        day_own_contribution = max(day_own_total - prior_total, 0.0)
-        running += day_own_contribution + deltas_by_day.get(day, 0.0)
-        bucket_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).replace(
-            hour=12
-        )
-        statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
-        day += timedelta(days=1)
+        deltas_by_day = deduped_by_day
+        earliest_day = min(deltas_by_day)
+        today = dt_util.now().date()
+        # Enough raw rows to comfortably cover from the oldest affected day to
+        # today, plus slack — this integration only ever writes at most one
+        # row per day.
+        rows_needed = (today - earliest_day).days + 30
 
-    async_add_external_statistics(hass, metadata, statistic_data)
-    # See _rewrite_metric_series for why this wait matters:
-    # async_add_external_statistics only queues the write, it doesn't block
-    # until it's committed.
-    await get_instance(hass).async_block_till_done()
+        def _query_existing() -> dict[date, float]:
+            # Deliberately NOT statistics_during_period(..., period="day", ...):
+            # that reduces/re-labels rows onto LOCAL-timezone day boundaries,
+            # whereas every row this integration writes is stamped at noon UTC
+            # (see _rewrite_metric_series). Converting a local-midnight-labeled
+            # boundary back to a UTC date with .date() silently shifts the day
+            # by one whenever the local UTC offset is non-zero (e.g. Australia/
+            # Adelaide, UTC+9:30) — this was a real bug: it mapped 15 Aug's row
+            # to "14 Aug" and made a new activity look like it landed on a day
+            # with no prior total, overwriting the whole series' running total
+            # back down to just that day's delta. get_last_statistics returns
+            # raw, unreduced rows, so the noon-UTC timestamp we ourselves wrote
+            # round-trips through .date() safely for any real-world UTC offset.
+            rows = get_last_statistics(hass, rows_needed, statistic_id, False, {"sum"})
+            series = rows.get(statistic_id, [])
+            return {
+                dt_util.utc_from_timestamp(row["start"]).date(): row["sum"] or 0.0
+                for row in series
+            }
+
+        existing_by_day = await get_instance(hass).async_add_executor_job(_query_existing)
+
+        metadata = _build_metric_metadata(statistic_id, activity_type, metric)
+        statistic_data: list[StatisticData] = []
+        # The live-write path only ever writes a row on a day that had a
+        # genuine delta — unlike the backfill, it does NOT guarantee a row
+        # exists for every single day (e.g. a rest day with no activity). So
+        # the day immediately before earliest_day frequently has no exact row
+        # even though real history exists further back —
+        # existing_by_day.get(earliest_day - 1 day, 0.0) was a real,
+        # repeatedly-hit bug: it silently fell back to 0.0 whenever the most
+        # recent prior write wasn't exactly yesterday, discarding the entire
+        # running total built up by every previous write and every backfilled
+        # day. The correct baseline is the latest row at or before
+        # earliest_day, whatever date it's actually stamped on — never a
+        # same-day-only lookup.
+        prior_days = [d for d in existing_by_day if d < earliest_day]
+        running = existing_by_day[max(prior_days)] if prior_days else 0.0
+        day = earliest_day
+        while day <= today:
+            prior_total = existing_by_day.get(day - timedelta(days=1), running)
+            day_own_total = existing_by_day.get(day, prior_total)
+            day_own_contribution = max(day_own_total - prior_total, 0.0)
+            running += day_own_contribution + deltas_by_day.get(day, 0.0)
+            bucket_start = datetime.combine(
+                day, datetime.min.time(), tzinfo=timezone.utc
+            ).replace(hour=12)
+            statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
+            day += timedelta(days=1)
+
+        async_add_external_statistics(hass, metadata, statistic_data)
+        # See _rewrite_metric_series for why this wait matters:
+        # async_add_external_statistics only queues the write, it doesn't
+        # block until it's committed. Still inside the lock: the next waiting
+        # call must not start its own read until this write has actually
+        # landed, or it would read the same stale baseline anyway.
+        await get_instance(hass).async_block_till_done()
+
+        # Record these source_ids as applied only now that the write has
+        # actually landed — if this task were cancelled or HA crashed before
+        # this point, the next attempt should still see these activities as
+        # unapplied and retry them, rather than silently losing them.
+        already_applied.update(newly_applied)
+        await store.async_save(list(already_applied))
 
 
 def _sum_metric(activities: list[Activity], metric: str) -> float:

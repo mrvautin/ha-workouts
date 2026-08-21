@@ -436,14 +436,22 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
                 if a.activity_type == self.entity_description.activity_type
                 and a.source_id not in self._counted_source_ids
             ]
-            deltas_by_day: dict[date, float] = {}
+            # (source_id, value) pairs, not pre-summed — async_apply_activity_deltas
+            # de-dupes by source_id against a persisted ledger before summing,
+            # since this entity's own _counted_source_ids is per-instance,
+            # in-memory state that can't protect against a second, independent
+            # CumulativeActivitySensor instance for the same statistic_id (see
+            # that function's docstring for the real bug this fixes).
+            deltas_by_day: dict[date, list[tuple[str, float]]] = {}
             for activity in new_activities:
                 value = self.entity_description.metric_value_fn(activity)
                 if value:
                     day = activity.start.date()
-                    deltas_by_day[day] = deltas_by_day.get(day, 0.0) + value
+                    deltas_by_day.setdefault(day, []).append((activity.source_id, value))
             if deltas_by_day:
-                self._cumulative_total += sum(deltas_by_day.values())
+                self._cumulative_total += sum(
+                    value for entries in deltas_by_day.values() for _, value in entries
+                )
                 self.hass.async_create_task(
                     async_apply_activity_deltas(
                         self.hass,
