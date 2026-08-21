@@ -19,6 +19,12 @@ STRAVA_OAUTH_SCOPES = "activity:read_all,read"
 
 DEFAULT_UPDATE_INTERVAL = timedelta(minutes=15)
 
+#: How often to run the background statistics consistency check (see
+#: statistics_import.async_check_statistics_consistency) — deliberately much
+#: less frequent than the data poll above, since it's a safety net for rare
+#: corruption, not something that needs near-real-time detection.
+CONSISTENCY_CHECK_INTERVAL = timedelta(hours=12)
+
 #: Options offered for how far back to import history. "all" is stored as 0 and
 #: means "no lower bound" — fetch back to whatever Garmin has.
 BACKFILL_DAYS_OPTIONS: dict[str, int] = {

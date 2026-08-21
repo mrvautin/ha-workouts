@@ -633,6 +633,60 @@ async def async_apply_activity_deltas(
         await store.async_save(list(already_applied))
 
 
+async def async_check_statistics_consistency(hass: HomeAssistant, entry_slug: str) -> None:
+    """Periodic safety net: log a loud warning if any statistic for this entry
+    is no longer monotonically non-decreasing.
+
+    This is a detector, not a fixer — it never modifies data. The lock and
+    persisted dedup ledger in async_apply_activity_deltas are the actual
+    prevention for the race that caused a real double-counting bug (see that
+    function's docstring); this exists in case some other, currently-unknown
+    bug corrupts a series in the future. A monotonicity violation is a hard,
+    unambiguous invariant violation for these series (see module docstring:
+    sum must be genuinely cumulative-forever) — cheap to check (no source API
+    calls, just a read of already-stored statistics) and catches corruption
+    from a stray write, a manual "Adjust a statistic" mistake, or any other
+    cause, without needing to know the specific mechanism in advance.
+
+    Deliberately does NOT attempt to auto-correct: a wrong automatic "fix"
+    based on incomplete information is how the original double-counting bug
+    happened in the first place. A logged warning at least surfaces the
+    problem promptly instead of leaving it to be discovered by chance when
+    someone happens to look at a graph.
+    """
+    statistic_ids = {
+        statistic_id_slug(entry_slug, activity_type, metric)
+        for activity_type in ActivityType
+        for metric in _metrics_for(activity_type)
+    }
+
+    def _check() -> list[str]:
+        problems: list[str] = []
+        for statistic_id in statistic_ids:
+            rows = get_last_statistics(hass, 400, statistic_id, False, {"sum"})
+            series = rows.get(statistic_id, [])
+            # get_last_statistics returns newest-first.
+            prev_sum: float | None = None
+            for row in reversed(series):
+                current = row["sum"] or 0.0
+                if prev_sum is not None and current < prev_sum - 1e-6:
+                    problems.append(
+                        f"{statistic_id}: sum dropped from {prev_sum:.2f} to "
+                        f"{current:.2f} at {dt_util.utc_from_timestamp(row['start']).date()}"
+                    )
+                prev_sum = current
+        return problems
+
+    problems = await get_instance(hass).async_add_executor_job(_check)
+    for problem in problems:
+        _LOGGER.warning(
+            "Statistics consistency check found a non-monotonic series "
+            "(likely corrupted data — consider using Developer Tools > "
+            "Statistics > Adjust a statistic to fix it): %s",
+            problem,
+        )
+
+
 def _sum_metric(activities: list[Activity], metric: str) -> float:
     if metric == "distance_km":
         return sum((a.distance_meters or 0) for a in activities) / 1000

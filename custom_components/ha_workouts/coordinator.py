@@ -10,10 +10,10 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
-from .const import DEFAULT_UPDATE_INTERVAL, DOMAIN
+from .const import CONSISTENCY_CHECK_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
 from .sources.base import WorkoutSource, WorkoutSourceAuthError, WorkoutSourceError
-from .statistics_import import BackfillProgress
+from .statistics_import import BackfillProgress, async_check_statistics_consistency
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -44,6 +44,11 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
         # own last_update_success — that's a bool, not a timestamp, and this
         # HA version's DataUpdateCoordinator doesn't track one itself.
         self.last_data_update: datetime | None = None
+        # Piggybacks on the regular poll rather than running its own timer —
+        # see statistics_import.async_check_statistics_consistency. Starts due
+        # immediately so a fresh install/reload gets one early check rather
+        # than waiting a full CONSISTENCY_CHECK_INTERVAL for the first one.
+        self._next_consistency_check = dt_util.now()
 
     @callback
     def async_mark_updated_now(self) -> None:
@@ -58,4 +63,14 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
             except WorkoutSourceError as err:
                 raise UpdateFailed(f"Error communicating with {self.source.key}: {err}") from err
             self.async_mark_updated_now()
-            return data
+
+        # Outside the request_lock/try block above: this only reads already-
+        # stored statistics, no source API calls, so it doesn't need the lock
+        # that serializes actual source requests, and a failure here shouldn't
+        # be treated as a fetch failure.
+        now = dt_util.now()
+        if now >= self._next_consistency_check:
+            self._next_consistency_check = now + CONSISTENCY_CHECK_INTERVAL
+            await async_check_statistics_consistency(self.hass, self.source.key)
+
+        return data
