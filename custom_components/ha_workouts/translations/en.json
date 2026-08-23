@@ -85,7 +85,7 @@
       "last_updated": { "name": "Last updated" }
     },
     "calendar": {
-      "activity_calendar": { "name": "Activities" }
+      "activity_type_calendar": { "name": "{activity_type} activities" }
     }
   }
 }

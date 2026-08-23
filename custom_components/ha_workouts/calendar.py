@@ -1,4 +1,10 @@
-"""Calendar entity: one event per logged activity, with pace/split detail.
+"""Calendar entities: one per activity type (running, cycling, ...), each
+showing that type's logged activities with pace/split detail.
+
+One calendar per type, rather than one calendar for everything, so a
+dashboard can show just the type(s) someone actually cares about — e.g. only
+running — instead of every activity type mixed into a single calendar with no
+way to filter it down.
 
 Backed by activity_log.py's persisted, per-entry activity log rather than the
 coordinator's live data (which only ever holds the most recent poll) — a
@@ -19,14 +25,19 @@ from homeassistant.util import dt as dt_util
 from .activity_log import async_get_activities_in_range
 from .const import DOMAIN
 from .coordinator import WorkoutDataUpdateCoordinator
-from .models import Activity, ActivitySplit
+from .models import Activity, ActivitySplit, ActivityType
 
 
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     coordinator: WorkoutDataUpdateCoordinator = hass.data[DOMAIN][entry.entry_id]
-    async_add_entities([ActivityCalendar(coordinator, entry)])
+    async_add_entities(
+        [
+            ActivityTypeCalendar(coordinator, entry, activity_type)
+            for activity_type in ActivityType
+        ]
+    )
 
 
 def _format_pace(seconds_per_km: float | None) -> str | None:
@@ -46,7 +57,7 @@ def _format_duration(total_seconds: float) -> str:
 
 
 def _build_description(activity: Activity) -> str:
-    lines = [f"Type: {activity.activity_type.value.replace('_', ' ').title()}"]
+    lines: list[str] = []
     if activity.distance_meters:
         lines.append(f"Distance: {activity.distance_meters / 1000:.2f} km")
     lines.append(f"Duration: {_format_duration(activity.duration_seconds)}")
@@ -85,16 +96,29 @@ def _format_split_line(split: ActivitySplit) -> str:
     )
 
 
-class ActivityCalendar(CalendarEntity):
-    """One calendar event per logged activity for this config entry."""
+class ActivityTypeCalendar(CalendarEntity):
+    """One calendar of logged activities for a single activity type (running,
+    cycling, ...) within this config entry.
+
+    Split out per type (rather than one calendar mixing every type together)
+    so a dashboard can show just the type(s) someone actually wants — e.g. add
+    only the Running calendar, leave Cycling off it entirely.
+    """
 
     _attr_has_entity_name = True
-    _attr_translation_key = "activity_calendar"
+    _attr_translation_key = "activity_type_calendar"
 
-    def __init__(self, coordinator: WorkoutDataUpdateCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: WorkoutDataUpdateCoordinator,
+        entry: ConfigEntry,
+        activity_type: ActivityType,
+    ) -> None:
         self._hass = coordinator.hass
         self._entry_slug = coordinator.source.key
-        self._attr_unique_id = f"{entry.entry_id}_activity_calendar"
+        self._activity_type = activity_type
+        self._attr_unique_id = f"{entry.entry_id}_{activity_type.value}_calendar"
+        self._attr_translation_placeholders = {"activity_type": activity_type.value}
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
@@ -115,7 +139,11 @@ class ActivityCalendar(CalendarEntity):
         activities = await async_get_activities_in_range(
             hass, self._entry_slug, start_date.date(), end_date.date()
         )
-        return [self._to_event(activity) for activity in activities]
+        return [
+            self._to_event(activity)
+            for activity in activities
+            if activity.activity_type == self._activity_type
+        ]
 
     def _to_event(self, activity: Activity) -> CalendarEvent:
         # as_local on a naive datetime just attaches the local tzinfo without
@@ -124,13 +152,16 @@ class ActivityCalendar(CalendarEntity):
         # sources/garmin.py's _parse_garmin_datetime), not UTC.
         start = dt_util.as_local(activity.start)
         end = start + timedelta(seconds=activity.duration_seconds)
-        summary_parts = [activity.activity_type.value.replace("_", " ").title()]
-        if activity.distance_meters:
-            summary_parts.append(f"{activity.distance_meters / 1000:.2f} km")
+        # The activity type itself is implied by which calendar this is, so
+        # it's left out of the summary — just a distance fallback when the
+        # source didn't give the activity its own name.
+        fallback_summary = (
+            f"{activity.distance_meters / 1000:.2f} km" if activity.distance_meters else "Workout"
+        )
         return CalendarEvent(
             start=start,
             end=end,
-            summary=activity.name or " – ".join(summary_parts),
+            summary=activity.name or fallback_summary,
             description=_build_description(activity),
             uid=activity.source_id,
         )
