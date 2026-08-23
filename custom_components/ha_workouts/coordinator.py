@@ -11,10 +11,11 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from homeassistant.util import dt as dt_util
 
 from .activity_log import async_record_activities
+from .backfill_progress import BackfillProgress
 from .const import CONSISTENCY_CHECK_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
 from .sources.base import WorkoutSource, WorkoutSourceAuthError, WorkoutSourceError
-from .statistics_import import BackfillProgress, async_check_statistics_consistency
+from .statistics_import import async_check_statistics_consistency
 
 _LOGGER = logging.getLogger(__name__)
 

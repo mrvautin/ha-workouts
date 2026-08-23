@@ -76,8 +76,6 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 
 from homeassistant.components.recorder import get_instance
@@ -95,6 +93,8 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .activity_log import async_record_activities
+from .backfill_progress import BackfillProgress
 from .const import DOMAIN
 from .models import Activity, ActivityType
 from .sources.base import WorkoutSource, WorkoutSourceRateLimitedError
@@ -196,27 +196,6 @@ def _metrics_for(activity_type: ActivityType) -> list[str]:
     return metrics
 
 
-@dataclass
-class BackfillProgress:
-    """Live progress state for one config entry's backfill, read by the status sensor.
-
-    on_change is set by the status sensor to a HA @callback (async_write_ha_state)
-    so it can push updates to itself the moment progress changes, instead of polling.
-    Must only be invoked from the event loop, same as the rest of this module.
-    """
-
-    state: str = "idle"  # idle | running | backing_off | complete | error
-    oldest_day_imported: date | None = None
-    target_day: date | None = None
-    days_imported_this_run: int = 0
-    error: str | None = None
-    on_change: Callable[[], None] | None = field(default=None, compare=False)
-
-    def notify(self) -> None:
-        if self.on_change is not None:
-            self.on_change()
-
-
 async def async_backfill_activity_statistics(
     hass: HomeAssistant,
     entry_slug: str,
@@ -304,6 +283,23 @@ async def async_backfill_activity_statistics(
                 await _rewrite_metric_series(
                     hass, statistic_id, activity_type, metric, day_buckets, start_day, end_day
                 )
+
+        # Also persist every fetched activity into the activity log (see
+        # activity_log.py) — without this, the log only ever contains
+        # activities seen via the live daily poll (today's), so a user
+        # running the opt-in splits backfill (activity_log's
+        # async_backfill_activity_splits) right after their first setup would
+        # find nothing to backfill: there'd be no historical activity RECORDS
+        # for it to fill splits into yet, even though the statistics tables
+        # above already have the aggregated distance/duration/calories.
+        all_activities = [
+            activity
+            for day_bucket in by_type_and_day.values()
+            for activities_on_day in day_bucket.values()
+            for activity in activities_on_day
+        ]
+        if all_activities:
+            await async_record_activities(hass, entry_slug, all_activities)
 
         progress.state = "complete"
         progress.notify()

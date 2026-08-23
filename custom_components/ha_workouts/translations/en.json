@@ -54,10 +54,9 @@
     "step": {
       "init": {
         "title": "History import depth",
-        "description": "Increasing this will fetch and import the additional older history in the background. It will not re-import days already covered.\n\nFor Garmin, you can also opt in to backfilling per-km pace/split data for past activities. This needs one extra request per activity (Garmin has no bulk endpoint for it), so it runs slowly in the background — leave it Off if you don't need historical pace data, since new activities always get splits automatically regardless of this setting.",
+        "description": "Increasing this will fetch and import the additional older history in the background. It will not re-import days already covered.\n\nFor Garmin, this depth also controls how far back per-km pace/split data is backfilled. Garmin has no bulk endpoint for splits, so it fetches them one activity at a time in the background — a large depth can take a while to fully catch up, but new activities always get splits right away regardless.",
         "data": {
-          "backfill_days": "History to import",
-          "splits_backfill_days": "Backfill pace/splits for past activities (Garmin only)"
+          "backfill_days": "History to import"
         }
       },
       "apple_health_webhook": {

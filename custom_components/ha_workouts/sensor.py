@@ -22,12 +22,11 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .activity_log import async_backfill_activity_splits
+from .backfill_progress import BackfillProgress
 from .const import (
     CONF_BACKFILL_DAYS,
     CONF_SOURCE_TYPE,
-    CONF_SPLITS_BACKFILL_DAYS,
     DEFAULT_BACKFILL_DAYS,
-    DEFAULT_SPLITS_BACKFILL_DAYS,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
     SOURCE_GARMIN,
@@ -36,7 +35,6 @@ from .coordinator import WorkoutDataUpdateCoordinator
 from .models import Activity, ActivityType, WorkoutData
 from .statistics_import import (
     DISTANCE_ACTIVITY_TYPES,
-    BackfillProgress,
     async_apply_activity_deltas,
     async_backfill_activity_statistics,
     entity_id_slug,
@@ -323,20 +321,17 @@ async def async_setup_entry(
         backfill_task.add_done_callback(_add_activity_type_sensors)
 
         if source_type == SOURCE_GARMIN:
-            # Independent of the activity/statistics backfill above — see
-            # activity_log.async_backfill_activity_splits for why this is
-            # opt-in, separately paced, and doesn't block sensor creation on
-            # anything (it only ever fills in already-recorded activities'
-            # missing splits, it doesn't gate any entity's initial state).
-            splits_backfill_days = entry.options.get(
-                CONF_SPLITS_BACKFILL_DAYS, DEFAULT_SPLITS_BACKFILL_DAYS
-            )
+            # Independent of the activity/statistics backfill above (runs as
+            # its own, separately-paced task, and doesn't gate sensor
+            # creation on anything — see activity_log.async_backfill_activity_splits).
+            # Shares the same backfill_days depth computed above rather than
+            # having its own separate setting.
             hass.async_create_task(
                 async_backfill_activity_splits(
                     hass,
                     entry_slug,
                     coordinator.source,
-                    splits_backfill_days,
+                    backfill_days,
                     coordinator.splits_backfill_progress,
                     coordinator.request_lock,
                 )

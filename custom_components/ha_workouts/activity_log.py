@@ -26,9 +26,9 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
+from .backfill_progress import BackfillProgress
 from .const import SPLITS_BACKFILL_PAUSE_SECONDS
 from .models import Activity, ActivitySplit, ActivityType
-from .statistics_import import BackfillProgress
 
 if TYPE_CHECKING:
     from .sources.garmin import GarminSource
@@ -123,34 +123,30 @@ async def async_backfill_activity_splits(
     hass: HomeAssistant,
     entry_slug: str,
     source: GarminSource,
-    splits_backfill_days: int,
+    backfill_days: int,
     progress: BackfillProgress,
     request_lock: asyncio.Lock,
 ) -> None:
-    """Opt-in background job: fetch per-km splits for past activities that don't have them yet.
+    """Background job: fetch per-km splits for past activities that don't have them yet.
 
     Garmin-only (the only source with a splits API right now — see
-    sources/garmin.py). Deliberately separate from, and far more slowly paced
-    than, async_backfill_activity_statistics: that job fetches whole date
-    ranges in a handful of requests; this one needs ONE request PER ACTIVITY,
-    since Garmin's API has no batch/bulk splits endpoint. Left as opt-in
-    (default Off, see const.DEFAULT_SPLITS_BACKFILL_DAYS) rather than
-    automatic, since even a modest running history can mean hundreds of extra
-    requests — SPLITS_BACKFILL_PAUSE_SECONDS between each keeps this well
-    clear of Garmin's rate limits even for a full multi-year history, at the
-    cost of the job taking hours for a large backfill depth.
+    sources/garmin.py). Shares its depth with the main activity/statistics
+    backfill (CONF_BACKFILL_DAYS/"History to import") rather than having its
+    own separate setting — deliberately simple, one knob for "how much
+    history", even though this job is far more slowly paced than
+    async_backfill_activity_statistics: that job fetches whole date ranges in
+    a handful of requests, this one needs ONE request PER ACTIVITY, since
+    Garmin's API has no batch/bulk splits endpoint. SPLITS_BACKFILL_PAUSE_SECONDS
+    between each keeps this well clear of Garmin's rate limits even for a full
+    multi-year history, at the cost of the job taking hours for a large depth.
 
     request_lock is shared with the coordinator's periodic poll and the main
     statistics backfill (see coordinator.py/statistics_import.py) so none of
     them ever send concurrent request streams to Garmin.
     """
-    if splits_backfill_days < 0:
-        # "Off" (the default) — see const.SPLITS_BACKFILL_DAYS_OPTIONS.
-        return
-
     today = dt_util.now().date()
-    start_day = date(1970, 1, 1) if splits_backfill_days == 0 else today - timedelta(
-        days=splits_backfill_days
+    start_day = date(1970, 1, 1) if backfill_days == 0 else today - timedelta(
+        days=backfill_days
     )
 
     activities = await async_load_activities(hass, entry_slug)
