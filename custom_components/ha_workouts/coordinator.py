@@ -10,6 +10,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
 
+from .activity_log import async_record_activities
 from .const import CONSISTENCY_CHECK_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
 from .sources.base import WorkoutSource, WorkoutSourceAuthError, WorkoutSourceError
@@ -31,6 +32,10 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
         self.entry = entry
         self.source = source
         self.backfill_progress = BackfillProgress()
+        # Separate from backfill_progress above: tracks the opt-in historical
+        # splits backfill (see activity_log.async_backfill_activity_splits),
+        # which runs independently and on a much slower cadence.
+        self.splits_backfill_progress = BackfillProgress()
         # Held by both this coordinator's periodic poll and the background history
         # backfill task, so the two never send concurrent request streams to the
         # same (possibly rate-limit-sensitive, possibly unofficial) source API.
@@ -64,10 +69,14 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
                 raise UpdateFailed(f"Error communicating with {self.source.key}: {err}") from err
             self.async_mark_updated_now()
 
-        # Outside the request_lock/try block above: this only reads already-
-        # stored statistics, no source API calls, so it doesn't need the lock
-        # that serializes actual source requests, and a failure here shouldn't
-        # be treated as a fetch failure.
+        # Outside the request_lock/try block above: neither of these makes a
+        # source API call (activity_log only writes to local storage; the
+        # consistency check only reads already-stored statistics), so neither
+        # needs the lock that serializes actual source requests, and a
+        # failure in either shouldn't be treated as a fetch failure.
+        if data.activities:
+            await async_record_activities(self.hass, self.source.key, data.activities)
+
         now = dt_util.now()
         if now >= self._next_consistency_check:
             self._next_consistency_check = now + CONSISTENCY_CHECK_INTERVAL

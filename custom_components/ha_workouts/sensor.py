@@ -21,10 +21,13 @@ from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
+from .activity_log import async_backfill_activity_splits
 from .const import (
     CONF_BACKFILL_DAYS,
     CONF_SOURCE_TYPE,
+    CONF_SPLITS_BACKFILL_DAYS,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_SPLITS_BACKFILL_DAYS,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
     SOURCE_GARMIN,
@@ -247,8 +250,26 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         WorkoutSensor(coordinator, entry, description) for description in summary_descriptions
     ]
-    entities.append(BackfillStatusSensor(coordinator, entry))
+    entities.append(
+        BackfillStatusSensor(
+            coordinator,
+            entry,
+            coordinator.backfill_progress,
+            "backfill_status",
+            "backfill_status",
+        )
+    )
     entities.append(LastUpdatedSensor(coordinator, entry))
+    if source_type == SOURCE_GARMIN:
+        entities.append(
+            BackfillStatusSensor(
+                coordinator,
+                entry,
+                coordinator.splits_backfill_progress,
+                "splits_backfill_status",
+                "splits_backfill_status",
+            )
+        )
     async_add_entities(entities)
 
     def _add_activity_type_sensors(_task: object | None = None) -> None:
@@ -300,6 +321,26 @@ async def async_setup_entry(
         # than racing it and permanently starting from 0 if the backfill is
         # still running at setup time.
         backfill_task.add_done_callback(_add_activity_type_sensors)
+
+        if source_type == SOURCE_GARMIN:
+            # Independent of the activity/statistics backfill above — see
+            # activity_log.async_backfill_activity_splits for why this is
+            # opt-in, separately paced, and doesn't block sensor creation on
+            # anything (it only ever fills in already-recorded activities'
+            # missing splits, it doesn't gate any entity's initial state).
+            splits_backfill_days = entry.options.get(
+                CONF_SPLITS_BACKFILL_DAYS, DEFAULT_SPLITS_BACKFILL_DAYS
+            )
+            hass.async_create_task(
+                async_backfill_activity_splits(
+                    hass,
+                    entry_slug,
+                    coordinator.source,
+                    splits_backfill_days,
+                    coordinator.splits_backfill_progress,
+                    coordinator.request_lock,
+                )
+            )
 
 
 class WorkoutSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
@@ -470,18 +511,31 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
 
 
 class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
-    """Reports progress of the background historical-import task.
+    """Reports progress of a background historical-import task.
 
-    State is one of idle/running/complete/error. Attributes expose how far back
-    the import has reached so far, useful while a multi-year backfill is in progress.
+    Generic over WHICH BackfillProgress it reports — used both for the main
+    activity/statistics backfill (coordinator.backfill_progress) and, for
+    Garmin, the separate opt-in splits backfill
+    (coordinator.splits_backfill_progress; see
+    activity_log.async_backfill_activity_splits). State is one of
+    idle/running/complete/error. Attributes expose how far back the import has
+    reached so far, useful while a multi-year backfill is in progress.
     """
 
     _attr_has_entity_name = True
-    _attr_translation_key = "backfill_status"
 
-    def __init__(self, coordinator: WorkoutDataUpdateCoordinator, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        coordinator: WorkoutDataUpdateCoordinator,
+        entry: ConfigEntry,
+        progress: BackfillProgress,
+        unique_id_suffix: str,
+        translation_key: str,
+    ) -> None:
         super().__init__(coordinator)
-        self._attr_unique_id = f"{entry.entry_id}_backfill_status"
+        self._progress = progress
+        self._attr_unique_id = f"{entry.entry_id}_{unique_id_suffix}"
+        self._attr_translation_key = translation_key
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, entry.entry_id)},
             name=entry.title,
@@ -490,13 +544,13 @@ class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sens
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
-        # backfill_progress updates independently of the coordinator's own refresh
-        # cycle (it's mutated from the background backfill task), so push a state
-        # write from there directly rather than polling for changes.
-        self.coordinator.backfill_progress.on_change = self._handle_progress_change
+        # progress updates independently of the coordinator's own refresh
+        # cycle (it's mutated from the background backfill task), so push a
+        # state write from there directly rather than polling for changes.
+        self._progress.on_change = self._handle_progress_change
 
     async def async_will_remove_from_hass(self) -> None:
-        self.coordinator.backfill_progress.on_change = None
+        self._progress.on_change = None
         await super().async_will_remove_from_hass()
 
     @callback
@@ -505,11 +559,11 @@ class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sens
 
     @property
     def native_value(self) -> str:
-        return self.coordinator.backfill_progress.state
+        return self._progress.state
 
     @property
     def extra_state_attributes(self) -> dict[str, object]:
-        progress: BackfillProgress = self.coordinator.backfill_progress
+        progress = self._progress
         return {
             "oldest_day_imported": (
                 progress.oldest_day_imported.isoformat()

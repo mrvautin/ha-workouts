@@ -14,7 +14,7 @@ from garminconnect import (
 )
 from homeassistant.core import HomeAssistant
 
-from ..models import Activity, ActivityType, DailySummary, WorkoutData
+from ..models import Activity, ActivitySplit, ActivityType, DailySummary, WorkoutData
 from .base import (
     WorkoutSource,
     WorkoutSourceAuthError,
@@ -59,6 +59,56 @@ def _parse_vo2_max(max_metrics: list[dict[str, Any]] | None) -> float | None:
         return None
     generic = (max_metrics[0] or {}).get("generic") or {}
     return generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
+
+
+def _parse_splits(raw: dict[str, Any] | None) -> list[ActivitySplit]:
+    """Parse get_activity_splits' response into per-km/mile ActivitySplit records.
+
+    Only "real" auto-laps are kept (intensityType == "INTERVAL") — Garmin's
+    lapDTOs can also include e.g. a trailing "REST" entry for a stopped watch,
+    which isn't a distance split and would throw off the cumulative running
+    totals below.
+    """
+    if not raw:
+        return []
+    lap_dtos = [
+        lap for lap in (raw.get("lapDTOs") or []) if lap.get("intensityType") == "INTERVAL"
+    ]
+    # lapIndex is 1-based and already in chronological order from Garmin, but
+    # sort defensively rather than assume the API always returns them ordered.
+    lap_dtos.sort(key=lambda lap: lap.get("lapIndex", 0))
+
+    splits: list[ActivitySplit] = []
+    cumulative_distance = 0.0
+    cumulative_elapsed = 0.0
+    for lap in lap_dtos:
+        distance = lap.get("distance") or 0.0
+        # elapsedDuration includes any paused/stopped time within the lap;
+        # duration is moving time only. elapsedDuration is what actually
+        # answers "how long, clock-on-wrist, to reach this point" — the thing
+        # asked for — so it's what the cumulative total is built from.
+        elapsed = lap.get("elapsedDuration") or lap.get("duration") or 0.0
+        cumulative_distance += distance
+        cumulative_elapsed += elapsed
+
+        avg_speed = lap.get("averageSpeed")  # metres/second
+        pace_seconds_per_km = (1000 / avg_speed) if avg_speed else None
+
+        splits.append(
+            ActivitySplit(
+                index=lap.get("lapIndex", len(splits) + 1),
+                distance_meters=distance,
+                duration_seconds=lap.get("duration") or 0.0,
+                elapsed_seconds=elapsed,
+                cumulative_distance_meters=cumulative_distance,
+                cumulative_elapsed_seconds=cumulative_elapsed,
+                avg_pace_seconds_per_km=pace_seconds_per_km,
+                avg_heart_rate=lap.get("averageHR"),
+                max_heart_rate=lap.get("maxHR"),
+                elevation_gain_meters=lap.get("elevationGain"),
+            )
+        )
+    return splits
 
 
 def _parse_garmin_datetime(value: str | None) -> datetime:
@@ -152,7 +202,43 @@ class GarminSource(WorkoutSource):
         activities = [self._parse_activity(item) for item in raw_activities or []]
         summary = self._parse_daily_summary(raw_stats, target_day, raw_max_metrics)
 
+        # Splits are one extra API call per activity — cheap here since a
+        # single day's poll only ever returns a handful of new activities at
+        # most (unlike async_fetch_activities_range's backfill, which can
+        # return hundreds; see sources/base.py's WorkoutSource docstring and
+        # statistics_import.py's splits backfill job for why that path
+        # deliberately does NOT fetch splits inline).
+        for activity in activities:
+            activity.splits = await self.async_fetch_splits(activity.source_id)
+
         return WorkoutData(activities=activities, daily_summary=summary)
+
+    async def async_fetch_splits(self, source_id: str) -> list[ActivitySplit]:
+        """Fetch per-km/mile auto-lap splits for one activity.
+
+        Used both for today's newly-seen activities (see async_fetch above)
+        and by the opt-in historical splits backfill job (see
+        statistics_import.async_backfill_activity_splits), which paces calls
+        to this far more conservatively than the main activity/statistics
+        backfill, since Garmin's API charges one full request per activity
+        with no batch/bulk endpoint available.
+        """
+        await self._async_ensure_authenticated()
+        assert self._client is not None
+
+        try:
+            raw_splits = await self._hass.async_add_executor_job(
+                self._client.get_activity_splits, source_id
+            )
+        except GarminConnectAuthenticationError as err:
+            self._client = None
+            raise WorkoutSourceAuthError("Garmin Connect session expired") from err
+        except GarminConnectTooManyRequestsError as err:
+            raise WorkoutSourceRateLimitedError(f"Garmin Connect rate limited us: {err}") from err
+        except GarminConnectConnectionError as err:
+            raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
+
+        return _parse_splits(raw_splits)
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date

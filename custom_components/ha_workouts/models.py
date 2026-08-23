@@ -20,6 +20,29 @@ class ActivityType(StrEnum):
 
 
 @dataclass(slots=True)
+class ActivitySplit:
+    """One auto-lap split within an activity (e.g. one km of a run).
+
+    cumulative_distance_meters/cumulative_elapsed_seconds are the running
+    totals AT THE END of this split — i.e. "how far/how long in, by the point
+    this split finished" — which is what answers "how long did it take to
+    reach the Nth km" directly, without the caller needing to sum prior splits
+    themselves.
+    """
+
+    index: int
+    distance_meters: float
+    duration_seconds: float
+    elapsed_seconds: float
+    cumulative_distance_meters: float
+    cumulative_elapsed_seconds: float
+    avg_pace_seconds_per_km: float | None = None
+    avg_heart_rate: int | None = None
+    max_heart_rate: int | None = None
+    elevation_gain_meters: float | None = None
+
+
+@dataclass(slots=True)
 class Activity:
     """A single logged workout/activity, normalized across sources."""
 
@@ -34,6 +57,11 @@ class Activity:
     max_heart_rate: int | None = None
     elevation_gain_meters: float | None = None
     name: str | None = None
+    #: Per-km (or per-mile, per the source's own auto-lap config) splits, if
+    #: the source provides them and we've fetched them for this activity.
+    #: None means "not fetched/not available" — distinct from an empty list,
+    #: which would mean "fetched, but the activity genuinely had no laps".
+    splits: list[ActivitySplit] | None = None
 
 
 @dataclass(slots=True)

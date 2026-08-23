@@ -35,3 +35,29 @@ BACKFILL_DAYS_OPTIONS: dict[str, int] = {
     "All available history": 0,
 }
 DEFAULT_BACKFILL_DAYS = 365
+
+CONF_SPLITS_BACKFILL_DAYS = "splits_backfill_days"
+
+#: Options for the opt-in historical splits backfill (Garmin only — see
+#: activity_log.async_backfill_activity_splits). Separate from
+#: BACKFILL_DAYS_OPTIONS/CONF_BACKFILL_DAYS above: unlike the main
+#: activity/statistics backfill, Garmin's API has no batch endpoint for
+#: splits — it's strictly one extra request per historical activity, so this
+#: is opt-in, defaults to Off, and is paced far more slowly (see
+#: SPLITS_BACKFILL_PAUSE_SECONDS).
+SPLITS_BACKFILL_DAYS_OPTIONS: dict[str, int] = {
+    "Off": -1,
+    "Last 30 days": 30,
+    "Last 90 days": 90,
+    "Last year": 365,
+    "All available history": 0,
+}
+DEFAULT_SPLITS_BACKFILL_DAYS = -1
+
+#: Pause between each activity's splits request during the historical splits
+#: backfill — far more conservative than the main backfill's per-CHUNK pause
+#: (statistics_import._CHUNK_DAYS's pacing), since this job makes one request
+#: PER ACTIVITY rather than per multi-month chunk; hundreds of historical
+#: activities at one request every 45s still finishes within a few hours
+#: without ever bursting Garmin's rate limits.
+SPLITS_BACKFILL_PAUSE_SECONDS = 45.0

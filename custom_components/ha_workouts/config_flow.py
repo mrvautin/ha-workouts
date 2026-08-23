@@ -29,12 +29,15 @@ from .const import (
     BACKFILL_DAYS_OPTIONS,
     CONF_BACKFILL_DAYS,
     CONF_SOURCE_TYPE,
+    CONF_SPLITS_BACKFILL_DAYS,
     CONF_WEBHOOK_ID,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_SPLITS_BACKFILL_DAYS,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
     SOURCE_GARMIN,
     SOURCE_STRAVA,
+    SPLITS_BACKFILL_DAYS_OPTIONS,
     STRAVA_OAUTH_SCOPES,
 )
 from .sources.base import WorkoutSourceAuthError, WorkoutSourceError
@@ -287,7 +290,9 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
     For Garmin/Strava: lets the user change how far back history is imported.
     Increasing the depth triggers the coordinator to fetch and import only the
     newly-uncovered older gap the next time it refreshes; it does not re-import
-    days already covered by existing statistics.
+    days already covered by existing statistics. Garmin additionally gets a
+    splits-backfill depth option (see activity_log.async_backfill_activity_splits)
+    — Strava has no splits support yet, so it's Garmin-only.
 
     For Apple Health: re-displays the webhook URL (there's no backfill depth to
     configure — see sources/apple_health.py). This is the only way to see the
@@ -301,9 +306,16 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
         if self.config_entry.data.get(CONF_SOURCE_TYPE) == SOURCE_APPLE_HEALTH:
             return await self.async_step_apple_health_webhook()
 
+        is_garmin = self.config_entry.data.get(CONF_SOURCE_TYPE) == SOURCE_GARMIN
+
         if user_input is not None:
             backfill_days = BACKFILL_DAYS_OPTIONS[user_input[CONF_BACKFILL_DAYS]]
-            return self.async_create_entry(data={CONF_BACKFILL_DAYS: backfill_days})
+            options = {CONF_BACKFILL_DAYS: backfill_days}
+            if is_garmin:
+                options[CONF_SPLITS_BACKFILL_DAYS] = SPLITS_BACKFILL_DAYS_OPTIONS[
+                    user_input[CONF_SPLITS_BACKFILL_DAYS]
+                ]
+            return self.async_create_entry(data=options)
 
         current_days = self.config_entry.options.get(
             CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS
@@ -312,14 +324,27 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
             (label for label, days in BACKFILL_DAYS_OPTIONS.items() if days == current_days),
             "1 year",
         )
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_BACKFILL_DAYS, default=current_label
-                ): vol.In(BACKFILL_DAYS_OPTIONS)
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        schema_fields = {
+            vol.Required(
+                CONF_BACKFILL_DAYS, default=current_label
+            ): vol.In(BACKFILL_DAYS_OPTIONS)
+        }
+        if is_garmin:
+            current_splits_days = self.config_entry.options.get(
+                CONF_SPLITS_BACKFILL_DAYS, DEFAULT_SPLITS_BACKFILL_DAYS
+            )
+            current_splits_label = next(
+                (
+                    label
+                    for label, days in SPLITS_BACKFILL_DAYS_OPTIONS.items()
+                    if days == current_splits_days
+                ),
+                "Off",
+            )
+            schema_fields[
+                vol.Required(CONF_SPLITS_BACKFILL_DAYS, default=current_splits_label)
+            ] = vol.In(SPLITS_BACKFILL_DAYS_OPTIONS)
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_fields))
 
     async def async_step_apple_health_webhook(
         self, user_input: dict[str, Any] | None = None
