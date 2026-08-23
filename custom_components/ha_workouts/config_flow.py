@@ -264,7 +264,14 @@ class HaWorkoutsConfigFlow(
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
             return self.async_create_entry(
-                title=f"Garmin ({self._email})",
+                # Deliberately just "Garmin", not "Garmin (email)": this title
+                # becomes every entity's device name, and HA slugifies that
+                # into entity_ids — an email address baked into every
+                # sensor.garmin_..._... entity_id is neither pretty nor
+                # something anyone actually wants to look at. If a second
+                # Garmin account is ever added, HA auto-suffixes the
+                # colliding device name (e.g. "Garmin 2") rather than erroring.
+                title="Garmin",
                 data={
                     CONF_SOURCE_TYPE: SOURCE_GARMIN,
                     CONF_EMAIL: self._email,
