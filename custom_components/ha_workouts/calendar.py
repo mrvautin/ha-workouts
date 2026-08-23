@@ -152,16 +152,28 @@ class ActivityTypeCalendar(CalendarEntity):
         # sources/garmin.py's _parse_garmin_datetime), not UTC.
         start = dt_util.as_local(activity.start)
         end = start + timedelta(seconds=activity.duration_seconds)
-        # The activity type itself is implied by which calendar this is, so
-        # it's left out of the summary — just a distance fallback when the
-        # source didn't give the activity its own name.
-        fallback_summary = (
-            f"{activity.distance_meters / 1000:.2f} km" if activity.distance_meters else "Workout"
-        )
         return CalendarEvent(
             start=start,
             end=end,
-            summary=activity.name or fallback_summary,
+            summary=_build_summary(activity),
             description=_build_description(activity),
             uid=activity.source_id,
         )
+
+
+def _build_summary(activity: Activity) -> str:
+    # HA's CalendarEvent has no attributes bag (only summary/description/
+    # location, all plain text — see homeassistant.components.calendar), so
+    # key stats are packed into the summary itself rather than left buried in
+    # description, which needs opening the event to read. The activity type
+    # is implied by which calendar this is, so it's left out here.
+    parts = [activity.name] if activity.name else []
+    if activity.distance_meters:
+        parts.append(f"{activity.distance_meters / 1000:.2f} km")
+    if activity.distance_meters and activity.duration_seconds:
+        avg_pace = _format_pace(activity.duration_seconds / (activity.distance_meters / 1000))
+        if avg_pace:
+            parts.append(avg_pace)
+    if not parts:
+        parts.append("Workout")
+    return " — ".join(parts)
