@@ -54,38 +54,85 @@
     "step": {
       "init": {
         "title": "History import depth",
-        "description": "Increasing this will fetch and import the additional older history in the background. It will not re-import days already covered.\n\nFor Garmin, this depth also controls how far back per-km pace/split data is backfilled. Garmin has no bulk endpoint for splits, so it fetches them one activity at a time in the background — a large depth can take a while to fully catch up, but new activities always get splits right away regardless.",
+        "description": "Increasing this will fetch and import the additional older history in the background. It will not re-import days already covered.\n\nFor Garmin, this depth also controls how far back per-km pace/split data is backfilled. Garmin has no bulk endpoint for splits, so it fetches them one activity at a time in the background — a large depth can take a while to fully catch up, but new activities always get splits right away regardless.\n\n\"Week starts on\" controls the week-to-date sensors (e.g. \"Running this week\") — Home Assistant has no global setting for this, only a per-card option, so it needs to be set here.",
         "data": {
-          "backfill_days": "History to import"
+          "backfill_days": "History to import",
+          "week_start_day": "Week starts on"
         }
       },
       "apple_health_webhook": {
         "title": "Apple Health webhook URL",
-        "description": "**Your webhook URL:**\n`{webhook_url}`\n\nUse this if you need to set up the Shortcut again — e.g. on a new phone, or if you've lost the original URL. See the README for the full Shortcut setup steps."
+        "description": "**Your webhook URL:**\n`{webhook_url}`\n\nUse this if you need to set up the Shortcut again — e.g. on a new phone, or if you've lost the original URL. See the README for the full Shortcut setup steps.\n\n\"Week starts on\" controls the week-to-date sensors (e.g. \"Running this week\").",
+        "data": {
+          "week_start_day": "Week starts on"
+        }
       }
     }
   },
   "entity": {
     "sensor": {
-      "steps": { "name": "Steps" },
-      "resting_heart_rate": { "name": "Resting heart rate" },
-      "active_calories": { "name": "Active calories" },
-      "floors_climbed": { "name": "Floors climbed" },
-      "stress_avg": { "name": "Average stress" },
-      "body_battery_max": { "name": "Body battery (max)" },
-      "vo2_max": { "name": "VO2 max" },
-      "last_activity_name": { "name": "Last activity" },
-      "last_activity_type": { "name": "Last activity type" },
-      "last_activity_duration": { "name": "Last activity duration" },
-      "activity_duration_minutes": { "name": "{activity_type} total duration" },
-      "activity_calories": { "name": "{activity_type} total calories" },
-      "activity_distance_km": { "name": "{activity_type} total distance" },
-      "backfill_status": { "name": "History import status" },
-      "splits_backfill_status": { "name": "Pace/splits import status" },
-      "last_updated": { "name": "Last updated" }
+      "steps": {
+        "name": "Steps"
+      },
+      "resting_heart_rate": {
+        "name": "Resting heart rate"
+      },
+      "active_calories": {
+        "name": "Active calories"
+      },
+      "floors_climbed": {
+        "name": "Floors climbed"
+      },
+      "stress_avg": {
+        "name": "Average stress"
+      },
+      "body_battery_max": {
+        "name": "Body battery (max)"
+      },
+      "vo2_max": {
+        "name": "VO2 max"
+      },
+      "last_activity_name": {
+        "name": "Last activity"
+      },
+      "last_activity_type": {
+        "name": "Last activity type"
+      },
+      "last_activity_duration": {
+        "name": "Last activity duration"
+      },
+      "activity_duration_minutes": {
+        "name": "{activity_type} total duration"
+      },
+      "activity_calories": {
+        "name": "{activity_type} total calories"
+      },
+      "activity_distance_km": {
+        "name": "{activity_type} total distance"
+      },
+      "backfill_status": {
+        "name": "History import status"
+      },
+      "splits_backfill_status": {
+        "name": "Pace/splits import status"
+      },
+      "last_updated": {
+        "name": "Last updated"
+      },
+      "activity_weektd": {
+        "name": "{activity_type} this week"
+      },
+      "activity_monthtd": {
+        "name": "{activity_type} this month"
+      },
+      "activity_yeartd": {
+        "name": "{activity_type} this year"
+      }
     },
     "calendar": {
-      "activity_type_calendar": { "name": "{activity_type} activities" }
+      "activity_type_calendar": {
+        "name": "{activity_type} activities"
+      }
     }
   }
 }

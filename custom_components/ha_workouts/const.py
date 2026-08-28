@@ -43,3 +43,17 @@ DEFAULT_BACKFILL_DAYS = 365
 #: activities at one request every 45s still finishes within a few hours
 #: without ever bursting Garmin's rate limits.
 SPLITS_BACKFILL_PAUSE_SECONDS = 45.0
+
+CONF_WEEK_START_DAY = "week_start_day"
+
+#: HA has no system-wide "first day of week" setting an integration can read
+#: (it's only a per-card option in Statistics Graph/Statistic card YAML, e.g.
+#: period.calendar.first_weekday — see
+#: homeassistant/components/recorder/util.py). So week-to-date sensors
+#: (period_sensors.py) need their own config. Values are Python's
+#: date.weekday() convention (Monday=0 .. Sunday=6).
+WEEK_START_DAY_OPTIONS: dict[str, int] = {
+    "Monday": 0,
+    "Sunday": 6,
+}
+DEFAULT_WEEK_START_DAY = 0  # Monday

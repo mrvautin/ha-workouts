@@ -20,19 +20,23 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
+from homeassistant.util import dt as dt_util
 
 from .activity_log import async_backfill_activity_splits
 from .backfill_progress import BackfillProgress
 from .const import (
     CONF_BACKFILL_DAYS,
     CONF_SOURCE_TYPE,
+    CONF_WEEK_START_DAY,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_WEEK_START_DAY,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
     SOURCE_GARMIN,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
 from .models import Activity, ActivityType, WorkoutData
+from .period_sensors import PeriodTotals, async_get_period_totals
 from .statistics_import import (
     DISTANCE_ACTIVITY_TYPES,
     async_apply_activity_deltas,
@@ -285,6 +289,18 @@ async def async_setup_entry(
             )
             for description in ACTIVITY_TYPE_SENSORS
         ]
+        activity_entities.extend(
+            PeriodToDateSensor(
+                coordinator,
+                entry,
+                entry_slug,
+                activity_type,
+                period,
+                explicit_entity_id=f"sensor.{entry_slug}_{activity_type.value}_{period}td",
+            )
+            for activity_type in ActivityType
+            for period in ("week", "month", "year")
+        )
         async_add_entities(activity_entities)
 
     if entry.data.get(CONF_SOURCE_TYPE) == SOURCE_APPLE_HEALTH:
@@ -503,6 +519,104 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
     @property
     def native_value(self) -> float:
         return round(self._cumulative_total, 2)
+
+
+class PeriodToDateSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
+    """Week/month/year-to-date total for one activity type.
+
+    See period_sensors.py's module docstring for why this exists: HA core's
+    own "change over a calendar period" statistics lookup produced a stuck,
+    incorrect year-to-date figure in real-world testing, so these sensors
+    compute the period sum directly from Activity records instead — no
+    recorder statistics period-boundary math involved.
+
+    Distance-capable activity types (running, cycling, etc.) use distance_km
+    as the main state, matching the existing per-type cumulative sensors'
+    split; other types (strength training, yoga, ...) use duration_minutes
+    instead, since distance doesn't apply to them. The metric not used as the
+    state, plus activity_count, are exposed as attributes rather than
+    separate entities — this is one sensor per activity type per period
+    (week/month/year), not one per metric, to avoid tripling the entity count.
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: WorkoutDataUpdateCoordinator,
+        entry: ConfigEntry,
+        entry_slug: str,
+        activity_type: ActivityType,
+        period: str,
+        explicit_entity_id: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_slug = entry_slug
+        self._activity_type = activity_type
+        self._period = period
+        self._uses_distance = activity_type in DISTANCE_ACTIVITY_TYPES
+        self._attr_unique_id = f"{entry.entry_id}_{activity_type.value}_{period}td"
+        self._attr_translation_key = f"activity_{period}td"
+        self._attr_translation_placeholders = {"activity_type": activity_type.value}
+        self._attr_native_unit_of_measurement = "km" if self._uses_distance else "min"
+        if self._uses_distance:
+            self._attr_device_class = SensorDeviceClass.DISTANCE
+        self.entity_id = explicit_entity_id
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=coordinator.source.key.capitalize(),
+        )
+        self._totals: PeriodTotals | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        await self._async_refresh_totals()
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # Recomputing here (rather than only reacting to new activities) is
+        # deliberately simple: this reads already-local activity_log data (no
+        # source API call), so there's no meaningful cost to just always
+        # recomputing on every coordinator update rather than trying to track
+        # "did anything actually change for this period" — and it's what
+        # correctly rolls the value back to 0 the moment a new week/month/year
+        # starts, with no separate reset logic needed.
+        self.hass.async_create_task(self._async_refresh_totals())
+        super()._handle_coordinator_update()
+
+    async def _async_refresh_totals(self) -> None:
+        week_start_day = self.coordinator.entry.options.get(
+            CONF_WEEK_START_DAY, DEFAULT_WEEK_START_DAY
+        )
+        self._totals = await async_get_period_totals(
+            self.hass,
+            self._entry_slug,
+            self._activity_type,
+            self._period,
+            dt_util.now().date(),
+            week_start_day,
+        )
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> float | None:
+        if self._totals is None:
+            return None
+        value = self._totals.distance_km if self._uses_distance else self._totals.duration_minutes
+        return round(value, 2)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        if self._totals is None:
+            return {}
+        attrs: dict[str, object] = {"activity_count": self._totals.activity_count}
+        if self._uses_distance:
+            attrs["duration_minutes"] = round(self._totals.duration_minutes, 2)
+        else:
+            attrs["distance_km"] = round(self._totals.distance_km, 2)
+        attrs["calories"] = round(self._totals.calories, 2)
+        return attrs
 
 
 class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):

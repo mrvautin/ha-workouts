@@ -30,12 +30,15 @@ from .const import (
     CONF_BACKFILL_DAYS,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
+    CONF_WEEK_START_DAY,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_WEEK_START_DAY,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
     SOURCE_GARMIN,
     SOURCE_STRAVA,
     STRAVA_OAUTH_SCOPES,
+    WEEK_START_DAY_OPTIONS,
 )
 from .sources.base import WorkoutSourceAuthError, WorkoutSourceError
 from .sources.garmin import GarminSource
@@ -288,6 +291,14 @@ class HaWorkoutsConfigFlow(
         return HaWorkoutsOptionsFlow()
 
 
+def _current_week_start_label(options: dict[str, Any]) -> str:
+    current = options.get(CONF_WEEK_START_DAY, DEFAULT_WEEK_START_DAY)
+    return next(
+        (label for label, day in WEEK_START_DAY_OPTIONS.items() if day == current),
+        "Monday",
+    )
+
+
 class HaWorkoutsOptionsFlow(OptionsFlow):
     """Configure options after setup.
 
@@ -299,10 +310,16 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
     activity_log.async_backfill_activity_splits) — deliberately one setting
     for "how much history", not a separate control to configure twice.
 
-    For Apple Health: re-displays the webhook URL (there's no backfill depth to
-    configure — see sources/apple_health.py). This is the only way to see the
-    URL again after initial setup, e.g. to set up the Shortcut on a second phone
-    or after forgetting it — the config flow only shows it once, during setup.
+    Every source also gets a "week starts on" option, driving the
+    week-to-date sensors (see period_sensors.py) — HA has no system-wide first-
+    day-of-week setting an integration can read, only a per-card option in
+    Statistics Graph/Statistic card YAML, so this needs to be our own setting.
+
+    For Apple Health: also re-displays the webhook URL (there's no backfill
+    depth to configure — see sources/apple_health.py). This is the only way to
+    see the URL again after initial setup, e.g. to set up the Shortcut on a
+    second phone or after forgetting it — the config flow only shows it once,
+    during setup.
     """
 
     async def async_step_init(
@@ -313,20 +330,30 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
 
         if user_input is not None:
             backfill_days = BACKFILL_DAYS_OPTIONS[user_input[CONF_BACKFILL_DAYS]]
-            return self.async_create_entry(data={CONF_BACKFILL_DAYS: backfill_days})
+            week_start_day = WEEK_START_DAY_OPTIONS[user_input[CONF_WEEK_START_DAY]]
+            return self.async_create_entry(
+                data={
+                    CONF_BACKFILL_DAYS: backfill_days,
+                    CONF_WEEK_START_DAY: week_start_day,
+                }
+            )
 
         current_days = self.config_entry.options.get(
             CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS
         )
-        current_label = next(
+        current_backfill_label = next(
             (label for label, days in BACKFILL_DAYS_OPTIONS.items() if days == current_days),
             "1 year",
         )
         schema = vol.Schema(
             {
                 vol.Required(
-                    CONF_BACKFILL_DAYS, default=current_label
-                ): vol.In(BACKFILL_DAYS_OPTIONS)
+                    CONF_BACKFILL_DAYS, default=current_backfill_label
+                ): vol.In(BACKFILL_DAYS_OPTIONS),
+                vol.Required(
+                    CONF_WEEK_START_DAY,
+                    default=_current_week_start_label(self.config_entry.options),
+                ): vol.In(WEEK_START_DAY_OPTIONS),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
@@ -335,13 +362,21 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         if user_input is not None:
-            # Nothing to save — this step is purely informational.
-            return self.async_create_entry(data={})
+            week_start_day = WEEK_START_DAY_OPTIONS[user_input[CONF_WEEK_START_DAY]]
+            return self.async_create_entry(data={CONF_WEEK_START_DAY: week_start_day})
 
         webhook_id = self.config_entry.data[CONF_WEBHOOK_ID]
         webhook_url = webhook.async_generate_url(self.hass, webhook_id)
+        schema = vol.Schema(
+            {
+                vol.Required(
+                    CONF_WEEK_START_DAY,
+                    default=_current_week_start_label(self.config_entry.options),
+                ): vol.In(WEEK_START_DAY_OPTIONS),
+            }
+        )
         return self.async_show_form(
             step_id="apple_health_webhook",
-            data_schema=vol.Schema({}),
+            data_schema=schema,
             description_placeholders={"webhook_url": webhook_url},
         )
