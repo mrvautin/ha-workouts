@@ -93,7 +93,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .activity_log import async_record_activities
+from .activity_log import async_get_activities_in_range, async_record_activities
 from .backfill_progress import BackfillProgress
 from .const import DOMAIN
 from .models import Activity, ActivityType
@@ -540,6 +540,31 @@ async def _rewrite_metric_series(
     if start_day > end_day:
         return
 
+    # Shares _lock_for(statistic_id) with async_apply_activity_deltas — without
+    # this, the two could race: the live poll reads a baseline before this
+    # rewrite lands, writes today's row on top of it, and then this rewrite
+    # raises an EARLIER day's total using fresher fetched data without
+    # touching today's already-written row — leaving today's cumulative sum
+    # stuck lower than yesterday's. Confirmed in production: a backfill run
+    # raised yesterday's total after the live poll had already stamped
+    # today's total using the old, lower baseline, producing a negative
+    # "change" for today. See async_apply_activity_deltas's own lock comment
+    # for the analogous same-process bug this same lock already prevents.
+    async with _lock_for(statistic_id):
+        await _rewrite_metric_series_locked(
+            hass, statistic_id, activity_type, metric, day_buckets, start_day, end_day
+        )
+
+
+async def _rewrite_metric_series_locked(
+    hass: HomeAssistant,
+    statistic_id: str,
+    activity_type: ActivityType,
+    metric: str,
+    day_buckets: dict[date, list[Activity]],
+    start_day: date,
+    end_day: date,
+) -> None:
     metadata = _build_metric_metadata(statistic_id, activity_type, metric)
 
     def _query_baseline() -> float:
@@ -575,7 +600,28 @@ async def _rewrite_metric_series(
                 return row["sum"] or 0.0
         return 0.0
 
+    def _query_tail() -> dict[date, float]:
+        # Rows the live poll (async_apply_activity_deltas) already wrote AFTER
+        # end_day — typically just "today", since the backfill's end_day is
+        # always yesterday. These were each stamped as (baseline-at-poll-time
+        # + that day's own delta), using whatever end_day's total was BEFORE
+        # this rewrite potentially raises it (e.g. a fresh backfill fetch
+        # finding more of yesterday's activity than the live poll had seen).
+        # Left alone, a tail row would stay stuck at its old, now-too-low
+        # absolute sum — producing a negative "change" for today once
+        # end_day's total moves past it. Re-stamping each tail day's own
+        # contribution on top of the freshly rewritten running total keeps
+        # the whole series monotonic across the rewrite boundary.
+        rows = get_last_statistics(hass, 30, statistic_id, False, {"sum"})
+        series = rows.get(statistic_id, [])
+        return {
+            dt_util.utc_from_timestamp(row["start"]).date(): row["sum"] or 0.0
+            for row in series
+            if dt_util.utc_from_timestamp(row["start"]).date() > end_day
+        }
+
     baseline = await get_instance(hass).async_add_executor_job(_query_baseline)
+    tail_by_day = await get_instance(hass).async_add_executor_job(_query_tail)
 
     # sum must be a genuinely lifetime-cumulative running total (never resets) —
     # see module docstring for why: HA's Statistics Graph "Change" mode computes
@@ -593,6 +639,17 @@ async def _rewrite_metric_series(
         )
         statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
         day += timedelta(days=1)
+
+    prior_tail_total = running
+    for tail_day in sorted(tail_by_day):
+        prior_day_total = tail_by_day.get(tail_day - timedelta(days=1), prior_tail_total)
+        tail_day_contribution = max(tail_by_day[tail_day] - prior_day_total, 0.0)
+        running += tail_day_contribution
+        bucket_start = datetime.combine(
+            tail_day, datetime.min.time(), tzinfo=timezone.utc
+        ).replace(hour=12)
+        statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
+        prior_tail_total = tail_by_day[tail_day]
 
     async_add_external_statistics(hass, metadata, statistic_data)
     # async_add_external_statistics only QUEUES the write on the recorder's
@@ -614,6 +671,7 @@ async def _rewrite_metric_series(
 
 async def async_apply_activity_deltas(
     hass: HomeAssistant,
+    entry_slug: str,
     statistic_id: str,
     activity_type: ActivityType,
     metric: str,
@@ -658,10 +716,24 @@ async def async_apply_activity_deltas(
     not apply a relative delta, so inserting a delta on a past day requires
     re-stamping every day from that point forward with the shifted cumulative
     total — otherwise later days would still show their old (too-low) sum and
-    the series would appear to dip back down the next day. This reads back each
-    existing day's own contribution (its sum minus the previous day's), applies
-    the new deltas on top, and rewrites the whole [earliest affected day, today]
-    tail as a fresh running total in one pass.
+    the series would appear to dip back down the next day.
+
+    Each affected day's OWN contribution is derived fresh from the activity
+    log (async_get_activities_in_range), the same source of truth
+    _rewrite_metric_series uses — deliberately NOT inferred by diffing this
+    day's previously-stored sum against the previous day's (an earlier
+    version did exactly that). That diff is only valid if neither stored
+    value has changed since it was written, which doesn't hold here: this
+    function runs concurrently with the backfill's _rewrite_metric_series
+    (see the shared _lock_for(statistic_id) above), which can raise an
+    EARLIER day's stored sum after this function already stamped a LATER
+    day's total on top of the old, lower value — a real, confirmed bug: a
+    backfill run corrected yesterday's total upward using freshly-fetched
+    data without anything then re-deriving today's, permanently leaving
+    today's cumulative sum stuck below yesterday's (a negative day-over-day
+    "change"). Recomputing every affected day's contribution from the
+    activity log itself, rather than from a potentially-stale prior write,
+    makes this self-healing across that race instead of just avoiding it.
 
     (Historical note: an earlier version wrote to the sensor.* entity's own
     statistic_id with state_class set, letting HA's recorder auto-compile its
@@ -702,58 +774,51 @@ async def async_apply_activity_deltas(
         if not deduped_by_day:
             return
 
-        deltas_by_day = deduped_by_day
-        earliest_day = min(deltas_by_day)
+        earliest_day = min(deduped_by_day)
         today = dt_util.now().date()
-        # Enough raw rows to comfortably cover from the oldest affected day to
-        # today, plus slack — this integration only ever writes at most one
-        # row per day.
-        rows_needed = (today - earliest_day).days + 30
 
-        def _query_existing() -> dict[date, float]:
-            # Deliberately NOT statistics_during_period(..., period="day", ...):
-            # that reduces/re-labels rows onto LOCAL-timezone day boundaries,
-            # whereas every row this integration writes is stamped at noon UTC
-            # (see _rewrite_metric_series). Converting a local-midnight-labeled
-            # boundary back to a UTC date with .date() silently shifts the day
-            # by one whenever the local UTC offset is non-zero (e.g. Australia/
-            # Adelaide, UTC+9:30) — this was a real bug: it mapped 15 Aug's row
-            # to "14 Aug" and made a new activity look like it landed on a day
-            # with no prior total, overwriting the whole series' running total
-            # back down to just that day's delta. get_last_statistics returns
-            # raw, unreduced rows, so the noon-UTC timestamp we ourselves wrote
-            # round-trips through .date() safely for any real-world UTC offset.
+        def _query_baseline() -> float:
+            # The latest stored row STRICTLY BEFORE earliest_day, whatever
+            # date it's actually stamped on — the live-write path only ever
+            # writes a row on a day that had a genuine delta (unlike the
+            # backfill, it does NOT guarantee a row for every single day, e.g.
+            # a rest day), so a same-day-only or "yesterday only" lookup was a
+            # real, repeatedly-hit bug: it silently fell back to 0.0 whenever
+            # the most recent prior write wasn't exactly the day before,
+            # discarding the entire running total built up by every earlier
+            # write and every backfilled day. Same technique as
+            # _rewrite_metric_series's _query_baseline, for the same reason.
+            rows_needed = (today - earliest_day).days + 30
             rows = get_last_statistics(hass, rows_needed, statistic_id, False, {"sum"})
             series = rows.get(statistic_id, [])
-            return {
-                dt_util.utc_from_timestamp(row["start"]).date(): row["sum"] or 0.0
-                for row in series
-            }
+            for row in series:
+                if dt_util.utc_from_timestamp(row["start"]).date() < earliest_day:
+                    return row["sum"] or 0.0
+            return 0.0
 
-        existing_by_day = await get_instance(hass).async_add_executor_job(_query_existing)
+        baseline = await get_instance(hass).async_add_executor_job(_query_baseline)
+
+        # async_get_activities_in_range is itself async (reads a Store via
+        # hass's own executor internally), so call it directly rather than
+        # wrapping it in another executor job.
+        activities = await async_get_activities_in_range(hass, entry_slug, earliest_day, today)
+        activities_by_day: dict[date, list[Activity]] = {}
+        for activity in activities:
+            if activity.activity_type == activity_type:
+                activities_by_day.setdefault(activity.start.date(), []).append(activity)
 
         metadata = _build_metric_metadata(statistic_id, activity_type, metric)
         statistic_data: list[StatisticData] = []
-        # The live-write path only ever writes a row on a day that had a
-        # genuine delta — unlike the backfill, it does NOT guarantee a row
-        # exists for every single day (e.g. a rest day with no activity). So
-        # the day immediately before earliest_day frequently has no exact row
-        # even though real history exists further back —
-        # existing_by_day.get(earliest_day - 1 day, 0.0) was a real,
-        # repeatedly-hit bug: it silently fell back to 0.0 whenever the most
-        # recent prior write wasn't exactly yesterday, discarding the entire
-        # running total built up by every previous write and every backfilled
-        # day. The correct baseline is the latest row at or before
-        # earliest_day, whatever date it's actually stamped on — never a
-        # same-day-only lookup.
-        prior_days = [d for d in existing_by_day if d < earliest_day]
-        running = existing_by_day[max(prior_days)] if prior_days else 0.0
+        running = baseline
         day = earliest_day
         while day <= today:
-            prior_total = existing_by_day.get(day - timedelta(days=1), running)
-            day_own_total = existing_by_day.get(day, prior_total)
-            day_own_contribution = max(day_own_total - prior_total, 0.0)
-            running += day_own_contribution + deltas_by_day.get(day, 0.0)
+            # Each day's own contribution comes from the activity log itself
+            # (see docstring for why this replaced diffing old stored sums) —
+            # NOT from deltas_by_day, which only holds newly-applied source_ids
+            # for days that happened to have one this call; a day already
+            # fully reflected by a previous call still needs its real total
+            # here so the whole [earliest_day, today] tail stays correct.
+            running += _sum_metric(activities_by_day.get(day, []), metric)
             bucket_start = datetime.combine(
                 day, datetime.min.time(), tzinfo=timezone.utc
             ).replace(hour=12)

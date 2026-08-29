@@ -511,6 +511,7 @@ class CumulativeActivitySensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], 
                 self.hass.async_create_task(
                     async_apply_activity_deltas(
                         self.hass,
+                        self.coordinator.source.key,
                         self._statistic_id,
                         self.entity_description.activity_type,
                         self.entity_description.metric,
