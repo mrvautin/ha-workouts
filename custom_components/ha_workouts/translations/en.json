@@ -119,6 +119,9 @@
       "last_updated": {
         "name": "Last updated"
       },
+      "history_start": {
+        "name": "History start date"
+      },
       "activity_weektd": {
         "name": "{activity_type} this week"
       },

@@ -121,6 +121,19 @@ _CHUNK_DAYS = 90
 # retry rather than aborting a multi-year import over one transient 429.
 _RATE_LIMIT_RETRY_DELAYS = (60, 300, 900)  # 1 min, 5 min, 15 min
 
+# For "All available history" (backfill_days=0, start_day=1970-01-01): stop
+# walking further back once this many consecutive chunks come back with zero
+# activities. Without this, an account with a real history of only, say, a
+# few months would still walk chunk-by-chunk all the way back to 1970 — every
+# one of those chunks genuinely empty, but each one still costs a full
+# request + backfill_chunk_pause_seconds wait, for no benefit. This is a real
+# bug that was hit in practice: a real account's backfill was still fetching
+# chunks back to 2018 with zero real data past ~Feb 2026. 3 consecutive empty
+# chunks (~270 days with zero activities) is generous enough to not falsely
+# stop during a genuinely long inactive stretch (e.g. an injury break) while
+# still cutting off a many-years-long walk through empty history quickly.
+_CONSECUTIVE_EMPTY_CHUNKS_TO_STOP = 3
+
 # Serializes async_apply_activity_deltas calls per statistic_id. Each call reads
 # the latest stored sum, computes a new running total, then writes it back —
 # a classic read-modify-write race if two calls for the SAME statistic_id ever
@@ -196,6 +209,35 @@ def _metrics_for(activity_type: ActivityType) -> list[str]:
     return metrics
 
 
+_EARLIEST_DAY_STORAGE_VERSION = 1
+
+
+def _earliest_known_activity_day_store(hass: HomeAssistant, entry_slug: str) -> Store[str]:
+    return Store(hass, _EARLIEST_DAY_STORAGE_VERSION, f"ha_workouts_earliest_day_{entry_slug}")
+
+
+async def async_get_earliest_known_activity_day(hass: HomeAssistant, entry_slug: str) -> date | None:
+    """The earliest day this backfill has confirmed has (or could have) real
+    activity data, if that's ever been established — see
+    async_backfill_activity_statistics's early-stop logic for how.
+
+    Also exposed as sensor.py's HistoryStartSensor, both to make this visible
+    (rather than a purely internal cache) and to double as the persistence
+    that lets future backfill runs skip re-walking a confirmed-empty range —
+    see that function's docstring for why re-deriving this from scratch every
+    run would otherwise be a real, confirmed performance bug for "All
+    available history" on an account with only a few months of real data.
+    """
+    raw = await _earliest_known_activity_day_store(hass, entry_slug).async_load()
+    return date.fromisoformat(raw) if raw else None
+
+
+async def async_set_earliest_known_activity_day(
+    hass: HomeAssistant, entry_slug: str, day: date
+) -> None:
+    await _earliest_known_activity_day_store(hass, entry_slug).async_save(day.isoformat())
+
+
 async def async_backfill_activity_statistics(
     hass: HomeAssistant,
     entry_slug: str,
@@ -222,6 +264,15 @@ async def async_backfill_activity_statistics(
     today = dt_util.now().date()
     end_day = today - timedelta(days=1)
     start_day = date(1970, 1, 1) if backfill_days == 0 else today - timedelta(days=backfill_days)
+
+    # If a previous run already walked back through empty history and hit the
+    # early-stop below, don't re-walk that same confirmed-empty range again —
+    # start from whichever is later: the requested depth, or the previously
+    # discovered real boundary. Only relevant for "All available history";
+    # for a fixed depth start_day is already bounded and this is a no-op.
+    cached_earliest = await async_get_earliest_known_activity_day(hass, entry_slug)
+    if cached_earliest is not None and cached_earliest > start_day:
+        start_day = cached_earliest
 
     progress.state = "running"
     progress.target_day = start_day
@@ -250,6 +301,13 @@ async def async_backfill_activity_statistics(
             lambda: defaultdict(list)
         )
 
+        # Tracks where the fetch loop actually stopped, which becomes the
+        # real start_day passed to _rewrite_metric_series below — see the
+        # early-stop logic further down for why this can end up later than
+        # the originally-requested start_day.
+        earliest_day_reached = end_day
+        consecutive_empty_chunks = 0
+
         chunk_end = end_day
         while chunk_end >= start_day:
             chunk_start = max(start_day, chunk_end - timedelta(days=_CHUNK_DAYS - 1))
@@ -261,6 +319,7 @@ async def async_backfill_activity_statistics(
                     activity
                 )
 
+            earliest_day_reached = chunk_start
             progress.days_imported_this_run += (chunk_end - chunk_start).days + 1
             progress.oldest_day_imported = chunk_start
             progress.notify()
@@ -272,6 +331,33 @@ async def async_backfill_activity_statistics(
                 progress.days_imported_this_run,
             )
 
+            if activities:
+                consecutive_empty_chunks = 0
+            else:
+                consecutive_empty_chunks += 1
+                if consecutive_empty_chunks >= _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP:
+                    # For a fixed depth (backfill_days != 0) this can't
+                    # trigger meaningfully early — start_day is already a
+                    # bounded, user-chosen window — but for "All available
+                    # history" (backfill_days=0, start_day=1970-01-01) this
+                    # is what stops a real account (with, say, only a few
+                    # months of genuine history) from walking chunk-by-chunk
+                    # all the way back to 1970, burning a full request +
+                    # pacing delay per chunk for years of guaranteed-empty
+                    # history. See _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP's
+                    # comment for why 3 chunks specifically.
+                    _LOGGER.debug(
+                        "Stopping backfill for %s after %d consecutive empty "
+                        "chunks — assuming no history before %s",
+                        entry_slug,
+                        consecutive_empty_chunks,
+                        chunk_start,
+                    )
+                    await async_set_earliest_known_activity_day(
+                        hass, entry_slug, earliest_day_reached
+                    )
+                    break
+
             chunk_end = chunk_start - timedelta(days=1)
             if chunk_end >= start_day:
                 await asyncio.sleep(source.backfill_chunk_pause_seconds)
@@ -281,7 +367,13 @@ async def async_backfill_activity_statistics(
             for metric in _metrics_for(activity_type):
                 statistic_id = statistic_id_slug(entry_slug, activity_type, metric)
                 await _rewrite_metric_series(
-                    hass, statistic_id, activity_type, metric, day_buckets, start_day, end_day
+                    hass,
+                    statistic_id,
+                    activity_type,
+                    metric,
+                    day_buckets,
+                    earliest_day_reached,
+                    end_day,
                 )
 
         # Also persist every fetched activity into the activity log (see
@@ -417,18 +509,73 @@ async def _rewrite_metric_series(
     start_day: date,
     end_day: date,
 ) -> None:
-    """Recompute and overwrite the entire [start_day, end_day] cumulative series.
+    """Recompute and overwrite the [start_day, end_day] cumulative series.
 
-    Deliberately does not try to anchor onto any existing data (see module
-    docstring for why): async_add_external_statistics upserts per-day rows, so
-    writing every day fresh from the just-fetched activities always produces
-    one self-consistent, genuinely monotonic series, whether or not a gap
-    previously existed anywhere in this range.
+    Rewrites every day IN this range from scratch based on freshly-fetched
+    activities (see module docstring for why: async_add_external_statistics
+    upserts per-day rows, so this always produces one self-consistent,
+    genuinely monotonic series across the range, whether or not a gap
+    previously existed anywhere in it).
+
+    Critically, this does NOT assume start_day is the true beginning of all
+    history — for any fixed backfill depth (not "All available history",
+    backfill_days=0), start_day is just the current edge of a ROLLING window
+    (today minus the configured depth), which moves forward by one day every
+    single day. Starting `running` at 0.0 unconditionally, as an earlier
+    version of this function did, meant every re-run of the backfill —
+    which happens on essentially every restart once at least a day has
+    passed, since _range_fully_covered always finds "yesterday" freshly
+    uncovered — silently overwrote whatever real cumulative total already
+    existed at the new start_day with 0, permanently severing continuity
+    with every earlier, out-of-window day. This was a real, confirmed bug:
+    a statistics consistency check caught a series dropping from a real
+    value straight to 0.00 exactly 365 days before "today", repeating on
+    every subsequent day as the window rolled forward.
+    (`existing_by_day` is the same lookup technique
+    async_apply_activity_deltas uses, and for the same reason: get_last_statistics
+    returns raw, unreduced rows, keyed by their real noon-UTC timestamp's
+    `.date()`, which round-trips safely regardless of the recorder's local
+    timezone — see that function's docstring for the timezone bug this avoids.)
     """
     if start_day > end_day:
         return
 
     metadata = _build_metric_metadata(statistic_id, activity_type, metric)
+
+    def _query_baseline() -> float:
+        # Deliberately NOT get_last_statistics(hass, 1, ...): that returns
+        # the single most recent row in the WHOLE table, which — critically
+        # — is very often already inside [start_day, end_day] itself (e.g.
+        # yesterday's row from the previous backfill run, which this very
+        # call is about to overwrite). That was a real bug in an earlier
+        # version of this fix: it silently returned 0.0 as "no genuine
+        # baseline" even when perfectly good older history existed, because
+        # the wrong row was being inspected. What's actually needed is the
+        # latest row STRICTLY BEFORE start_day.
+        #
+        # Also deliberately NOT statistics_during_period(..., period="day",
+        # ...): that reduces/re-labels rows onto LOCAL-timezone day
+        # boundaries (see async_apply_activity_deltas's docstring for the
+        # exact, previously-hit bug this causes — a noon-UTC row can get
+        # mislabeled a day off in a non-zero-UTC-offset timezone). Since this
+        # baseline lookup needs to draw a precise line at exactly start_day,
+        # that mislabeling risk is unacceptable here.
+        #
+        # Instead: request enough of the most recent RAW (unreduced) rows to
+        # be certain of reaching past start_day even for a multi-year
+        # backfill depth, then filter to the one immediately before
+        # start_day by its real noon-UTC timestamp's .date() — the same
+        # safe technique used throughout this module.
+        rows_needed = (end_day - start_day).days + 30
+        rows = get_last_statistics(hass, rows_needed, statistic_id, False, {"sum"})
+        series = rows.get(statistic_id, [])
+        # get_last_statistics returns newest-first.
+        for row in series:
+            if dt_util.utc_from_timestamp(row["start"]).date() < start_day:
+                return row["sum"] or 0.0
+        return 0.0
+
+    baseline = await get_instance(hass).async_add_executor_job(_query_baseline)
 
     # sum must be a genuinely lifetime-cumulative running total (never resets) —
     # see module docstring for why: HA's Statistics Graph "Change" mode computes
@@ -436,7 +583,7 @@ async def _rewrite_metric_series(
     # awareness of last_reset, so a value that resets would produce large
     # spurious negative spikes there.
     statistic_data: list[StatisticData] = []
-    running = 0.0
+    running = baseline
     day = start_day
     while day <= end_day:
         running += _sum_metric(day_buckets.get(day, []), metric)

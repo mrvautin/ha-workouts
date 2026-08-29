@@ -41,6 +41,7 @@ from .statistics_import import (
     DISTANCE_ACTIVITY_TYPES,
     async_apply_activity_deltas,
     async_backfill_activity_statistics,
+    async_get_earliest_known_activity_day,
     entity_id_slug,
     statistic_id_slug,
 )
@@ -312,6 +313,9 @@ async def async_setup_entry(
         coordinator.backfill_progress.state = "complete"
         _add_activity_type_sensors()
     else:
+        async_add_entities(
+            [HistoryStartSensor(coordinator, entry, entry_slug, coordinator.backfill_progress)]
+        )
         # Backfill historical per-type statistics in the background so setup isn't
         # blocked by what can be a long-running, multi-year import. Progress is
         # exposed via coordinator.backfill_progress / the status sensor above.
@@ -683,6 +687,70 @@ class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sens
             "days_imported_this_run": progress.days_imported_this_run,
             "error": progress.error,
         }
+
+
+class HistoryStartSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
+    """Reports the earliest day this integration has confirmed has real
+    activity history, once the backfill's early-stop (see
+    statistics_import.py's _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP) has discovered
+    it.
+
+    Doubles as a user-visible confirmation of how far back the import
+    actually reached — the same value is read back by
+    async_backfill_activity_statistics on every future run so it doesn't
+    needlessly re-walk a range it already confirmed is empty (see that
+    function's docstring). Stays unknown until the backfill has actually hit
+    the early-stop at least once; for a fixed (non-zero) backfill_days depth
+    it never triggers, so this sensor stays unknown in that configuration.
+    """
+
+    _attr_has_entity_name = True
+    _attr_device_class = SensorDeviceClass.DATE
+    _attr_translation_key = "history_start"
+
+    def __init__(
+        self,
+        coordinator: WorkoutDataUpdateCoordinator,
+        entry: ConfigEntry,
+        entry_slug: str,
+        progress: BackfillProgress,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_slug = entry_slug
+        self._attr_unique_id = f"{entry.entry_id}_history_start"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=coordinator.source.key.capitalize(),
+        )
+        self._progress = progress
+        self._earliest_day: date | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        # The persisted value only changes when the backfill's early-stop
+        # fires, which is signalled the same way BackfillStatusSensor learns
+        # of progress — piggyback on that rather than polling.
+        self._progress.on_change = self._handle_progress_change
+        await self._async_refresh_value()
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._progress.on_change = None
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_progress_change(self) -> None:
+        self.hass.async_create_task(self._async_refresh_value())
+
+    async def _async_refresh_value(self) -> None:
+        self._earliest_day = await async_get_earliest_known_activity_day(
+            self.hass, self._entry_slug
+        )
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> date | None:
+        return self._earliest_day
 
 
 class LastUpdatedSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
