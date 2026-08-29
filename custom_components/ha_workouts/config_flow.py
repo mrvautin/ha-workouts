@@ -24,6 +24,12 @@ from homeassistant.core import callback
 from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.helpers.selector import (
+    SelectOptionDict,
+    SelectSelector,
+    SelectSelectorConfig,
+    SelectSelectorMode,
+)
 
 from .const import (
     BACKFILL_DAYS_OPTIONS,
@@ -60,8 +66,33 @@ _SOURCE_PICKER_SCHEMA = vol.Schema(
     }
 )
 
+def _label_selector(options: dict[str, int]) -> SelectSelector:
+    """Build a SelectSelector showing each dict key as its own display label.
+
+    vol.In(options) on a label -> int dict looks correct in isolation, but HA's
+    frontend renders a plain vol.In(dict) selector using the dict's VALUES as
+    both the submitted value and the displayed label — falling back to raw
+    numbers like "0"/"1825"/"6" instead of "All available history"/"5 years"/
+    "Sunday" (a real, user-reported bug). SelectOptionDict's explicit
+    value/label pair is what actually renders friendly text; the label string
+    itself is still what's submitted back in user_input, matching the
+    label-keyed lookups (e.g. BACKFILL_DAYS_OPTIONS[user_input[...]]) already
+    used throughout this module.
+    """
+    return SelectSelector(
+        SelectSelectorConfig(
+            options=[SelectOptionDict(value=label, label=label) for label in options],
+            mode=SelectSelectorMode.LIST,
+        )
+    )
+
+
 _BACKFILL_SCHEMA = vol.Schema(
-    {vol.Required(CONF_BACKFILL_DAYS, default="1 year"): vol.In(BACKFILL_DAYS_OPTIONS)}
+    {
+        vol.Required(CONF_BACKFILL_DAYS, default="1 year"): _label_selector(
+            BACKFILL_DAYS_OPTIONS
+        )
+    }
 )
 
 
@@ -349,11 +380,11 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
             {
                 vol.Required(
                     CONF_BACKFILL_DAYS, default=current_backfill_label
-                ): vol.In(BACKFILL_DAYS_OPTIONS),
+                ): _label_selector(BACKFILL_DAYS_OPTIONS),
                 vol.Required(
                     CONF_WEEK_START_DAY,
                     default=_current_week_start_label(self.config_entry.options),
-                ): vol.In(WEEK_START_DAY_OPTIONS),
+                ): _label_selector(WEEK_START_DAY_OPTIONS),
             }
         )
         return self.async_show_form(step_id="init", data_schema=schema)
@@ -372,7 +403,7 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
                 vol.Required(
                     CONF_WEEK_START_DAY,
                     default=_current_week_start_label(self.config_entry.options),
-                ): vol.In(WEEK_START_DAY_OPTIONS),
+                ): _label_selector(WEEK_START_DAY_OPTIONS),
             }
         )
         return self.async_show_form(
