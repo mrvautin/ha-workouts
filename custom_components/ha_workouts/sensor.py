@@ -32,6 +32,7 @@ from .const import (
     DEFAULT_WEEK_START_DAY,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
+    SOURCE_COROS,
     SOURCE_GARMIN,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
@@ -116,6 +117,37 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
         value_fn=lambda data: data.daily_summary.vo2_max if data.daily_summary else None,
     ),
     WorkoutSensorDescription(
+        key="training_readiness_score",
+        translation_key="training_readiness_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_score if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_readiness_level",
+        translation_key="training_readiness_level",
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_level if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_readiness_feedback",
+        translation_key="training_readiness_feedback",
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_feedback if data.daily_summary else None
+        ),
+    ),
+)
+
+#: HRV sensors — split out from DAILY_SUMMARY_SENSORS since, unlike the rest
+#: of that set (steps, body battery, etc.), Coros also populates
+#: DailySummary's HRV fields (see sources/coros.py's _fetch_daily_summary) —
+#: just not any of DAILY_SUMMARY_SENSORS' other fields, which would sit
+#: permanently "unknown" for a Coros entry if it opted into that whole set.
+#: See SOURCES_WITH_HRV.
+HRV_SENSORS: tuple[WorkoutSensorDescription, ...] = (
+    WorkoutSensorDescription(
         key="hrv_last_night_avg",
         translation_key="hrv_last_night_avg",
         native_unit_of_measurement="ms",
@@ -137,28 +169,6 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
         key="hrv_status",
         translation_key="hrv_status",
         value_fn=lambda data: data.daily_summary.hrv_status if data.daily_summary else None,
-    ),
-    WorkoutSensorDescription(
-        key="training_readiness_score",
-        translation_key="training_readiness_score",
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_score if data.daily_summary else None
-        ),
-    ),
-    WorkoutSensorDescription(
-        key="training_readiness_level",
-        translation_key="training_readiness_level",
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_level if data.daily_summary else None
-        ),
-    ),
-    WorkoutSensorDescription(
-        key="training_readiness_feedback",
-        translation_key="training_readiness_feedback",
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_feedback if data.daily_summary else None
-        ),
     ),
 )
 
@@ -190,6 +200,11 @@ LAST_ACTIVITY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
 
 #: Source types whose API exposes device-level daily stats (steps, HR, etc.).
 SOURCES_WITH_DAILY_SUMMARY = {SOURCE_GARMIN}
+
+#: Source types whose API can populate DailySummary's HRV fields — a
+#: narrower set than SOURCES_WITH_DAILY_SUMMARY above, since Coros only ever
+#: populates those three fields, never the rest (steps, body battery, etc.).
+SOURCES_WITH_HRV = {SOURCE_GARMIN, SOURCE_COROS}
 
 
 def _activity_duration_minutes(activity: Activity) -> float:
@@ -294,6 +309,12 @@ async def async_setup_entry(
     summary_descriptions = list(LAST_ACTIVITY_SENSORS)
     if source_type in SOURCES_WITH_DAILY_SUMMARY:
         summary_descriptions = list(DAILY_SUMMARY_SENSORS) + summary_descriptions
+    # SOURCES_WITH_DAILY_SUMMARY sources (Garmin) are always also in
+    # SOURCES_WITH_HRV, so this always fires for them too — HRV_SENSORS is
+    # additive to DAILY_SUMMARY_SENSORS above, not part of it, since Coros is
+    # in SOURCES_WITH_HRV without being in SOURCES_WITH_DAILY_SUMMARY.
+    if source_type in SOURCES_WITH_HRV:
+        summary_descriptions = list(HRV_SENSORS) + summary_descriptions
 
     entities: list[SensorEntity] = [
         WorkoutSensor(coordinator, entry, description) for description in summary_descriptions

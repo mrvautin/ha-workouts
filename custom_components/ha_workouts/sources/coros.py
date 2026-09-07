@@ -38,7 +38,7 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from ..models import Activity, ActivitySplit, ActivityType, WorkoutData
+from ..models import Activity, ActivitySplit, ActivityType, DailySummary, WorkoutData
 from .base import (
     WorkoutSource,
     WorkoutSourceAuthError,
@@ -235,9 +235,29 @@ class CorosSource(WorkoutSource):
             activity.splits = await self.async_fetch_splits(
                 activity.source_id, _activity_sport_type(activity)
             )
-        # Coros's Training Hub API has no equivalent of Garmin's daily
-        # steps/resting-HR/body-battery summary endpoint — only activities.
-        return WorkoutData(activities=activities, daily_summary=None)
+        # Coros's dashboard endpoint has no date parameter — it always
+        # answers for "now", unlike the activity list above — so this is
+        # only ever meaningful for today's live poll, never the historical
+        # backfill range (see async_fetch_activities_range, which never
+        # calls this). No equivalent of Garmin's steps/resting-HR/body
+        # battery here — only HRV, and only if the account's watch model
+        # actually records overnight HRV at all (see _parse_dashboard).
+        summary = await self._fetch_daily_summary(target_day)
+        return WorkoutData(activities=activities, daily_summary=summary)
+
+    async def _fetch_daily_summary(self, target_day: date) -> DailySummary | None:
+        body = await self._request("GET", "/dashboard/query")
+        summary_info = (body.get("data") or {}).get("summaryInfo") or {}
+        hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_dashboard_hrv(summary_info)
+        if hrv_last_night_avg is None and hrv_weekly_avg is None and hrv_status is None:
+            return None
+        return DailySummary(
+            source=self.key,
+            day=target_day,
+            hrv_last_night_avg=hrv_last_night_avg,
+            hrv_weekly_avg=hrv_weekly_avg,
+            hrv_status=hrv_status,
+        )
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date
@@ -336,6 +356,34 @@ def _parse_coros_timestamp(value: int | None) -> datetime:
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
     return datetime.fromtimestamp(value, tz=timezone.utc)
+
+
+def _parse_dashboard_hrv(
+    summary_info: dict[str, Any],
+) -> tuple[float | None, float | None, str | None]:
+    """Extract (last_night_avg, 7day_avg, status) from /dashboard/query's
+    summaryInfo.sleepHrvData.
+
+    Coros only records overnight HRV on some watch models — sleepHrvList
+    comes back as an empty list (schema present, no readings) for an
+    account whose watch doesn't capture it at all, which is the common case
+    and not an error condition; this returns (None, None, None) then, same
+    as Garmin does for a day with no reading yet.
+
+    Unlike Garmin's response, Coros has no server-computed weekly average or
+    qualitative status bucket (e.g. "BALANCED") — only a per-night value
+    keyed by day. The 7-day average is computed here from whatever recent
+    nights are present (fewer than 7 if that's all there is); status is left
+    None rather than inventing a bucket Coros doesn't actually provide.
+    """
+    hrv_data = summary_info.get("sleepHrvData") or {}
+    nights = hrv_data.get("sleepHrvList") or []
+    readings = [n["avgSleepHrv"] for n in nights if n.get("avgSleepHrv") is not None]
+    if not readings:
+        return None, None, None
+    last_night_avg = readings[-1]
+    weekly_avg = sum(readings) / len(readings)
+    return last_night_avg, weekly_avg, None
 
 
 def _parse_splits(lap_dtos: list[dict[str, Any]]) -> list[ActivitySplit]:
