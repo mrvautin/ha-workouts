@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add a data source",
-        "description": "Choose which service to pull workout data from. You can add Garmin, Strava, Apple Health, or any combination, by running this setup again.",
+        "description": "Choose which service to pull workout data from. You can add Garmin, Coros, Strava, Apple Health, or any combination, by running this setup again.",
         "data": {
           "source_type": "Source"
         }
@@ -14,6 +14,15 @@
         "data": {
           "email": "Email",
           "password": "Password"
+        }
+      },
+      "coros": {
+        "title": "Connect to Coros",
+        "description": "Enter your Coros account credentials. These are used only to authenticate with Coros's servers and are stored locally in Home Assistant.\n\n**Note:** logging in here will sign you out of the Coros app/Training Hub on any other device, and vice versa — Coros only allows one active session per account. This isn't something this integration can avoid; it's how Coros's own session system works.\n\nSelect \"Global (default)\" unless you know your account is specifically registered in Europe or China — most accounts, including outside those two regions, use the global default. If setup fails, try one of the other options.",
+        "data": {
+          "email": "Email",
+          "password": "Password",
+          "coros_region": "Region"
         }
       },
       "pick_implementation": {
@@ -34,7 +43,7 @@
     },
     "error": {
       "invalid_auth": "Invalid email or password.",
-      "cannot_connect": "Could not connect to Garmin Connect. Please try again.",
+      "cannot_connect": "Could not connect. Please try again.",
       "unknown": "Unexpected error."
     },
     "abort": {

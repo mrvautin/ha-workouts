@@ -9,7 +9,29 @@ CONF_BACKFILL_DAYS = "backfill_days"
 SOURCE_GARMIN = "garmin"
 SOURCE_STRAVA = "strava"
 SOURCE_APPLE_HEALTH = "apple_health"
-SOURCE_TYPES = [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH]
+SOURCE_COROS = "coros"
+SOURCE_TYPES = [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS]
+
+#: Coros account region — determines which regional API host a login token is
+#: valid on (a token from one region is rejected by the others). See
+#: sources/coros.py's module docstring for why this can't be auto-detected.
+#:
+#: "us" is Coros's global default host (teamapi.coros.com) — confirmed by
+#: direct testing that an Australian account's token is only accepted there,
+#: NOT on the "Asia" (teamcnapi) host as its geography might suggest. "eu"
+#: and "cn" are the two real regional exceptions (European and Mainland
+#: China accounts respectively); every other account, regardless of actual
+#: location, uses the "us"/default host. Labeled accordingly below so the
+#: picker doesn't mislead users the way "Europe/Americas/Asia" originally did
+#: (a real, user-hit bug — an Australian account failed against both
+#: "Europe" and "Asia" before this was traced to needing "Global").
+CONF_COROS_REGION = "coros_region"
+COROS_REGION_OPTIONS: dict[str, str] = {
+    "Global (default)": "us",
+    "Europe": "eu",
+    "China": "cn",
+}
+DEFAULT_COROS_REGION = "us"
 
 CONF_WEBHOOK_ID = "webhook_id"
 

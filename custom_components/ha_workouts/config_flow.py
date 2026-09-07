@@ -1,11 +1,12 @@
-"""Config flow for ha_workouts. Supports Garmin Connect (email/password), Strava
-(OAuth2 via Home Assistant's Application Credentials system), and Apple Health
-(a generated webhook URL for an iOS Shortcut to POST workouts to).
+"""Config flow for ha_workouts. Supports Garmin Connect (email/password), Coros
+(email/password, plus a region picker — see sources/coros.py), Strava (OAuth2
+via Home Assistant's Application Credentials system), and Apple Health (a
+generated webhook URL for an iOS Shortcut to POST workouts to).
 
-A user can add any combination of Garmin, Strava, and Apple Health entries —
-each is a separate config entry, so sensors from any source can be added
-independently and coexist (their entity_ids are prefixed by source key, see
-statistics_import.py).
+A user can add any combination of Garmin, Coros, Strava, and Apple Health
+entries — each is a separate config entry, so sensors from any source can be
+added independently and coexist (their entity_ids are prefixed by source key,
+see statistics_import.py).
 """
 from __future__ import annotations
 
@@ -34,19 +35,23 @@ from homeassistant.helpers.selector import (
 from .const import (
     BACKFILL_DAYS_OPTIONS,
     CONF_BACKFILL_DAYS,
+    CONF_COROS_REGION,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
     CONF_WEEK_START_DAY,
+    COROS_REGION_OPTIONS,
     DEFAULT_BACKFILL_DAYS,
     DEFAULT_WEEK_START_DAY,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
+    SOURCE_COROS,
     SOURCE_GARMIN,
     SOURCE_STRAVA,
     STRAVA_OAUTH_SCOPES,
     WEEK_START_DAY_OPTIONS,
 )
 from .sources.base import WorkoutSourceAuthError, WorkoutSourceError
+from .sources.coros import CorosSource
 from .sources.garmin import GarminSource
 
 _LOGGER = logging.getLogger(__name__)
@@ -61,12 +66,13 @@ STEP_GARMIN_SCHEMA = vol.Schema(
 _SOURCE_PICKER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SOURCE_TYPE): vol.In(
-            [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH]
+            [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS]
         )
     }
 )
 
-def _label_selector(options: dict[str, int]) -> SelectSelector:
+
+def _label_selector(options: dict[str, Any]) -> SelectSelector:
     """Build a SelectSelector showing each dict key as its own display label.
 
     vol.In(options) on a label -> int dict looks correct in isolation, but HA's
@@ -95,6 +101,16 @@ _BACKFILL_SCHEMA = vol.Schema(
     }
 )
 
+_STEP_COROS_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_EMAIL): str,
+        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_COROS_REGION, default="Global (default)"): _label_selector(
+            COROS_REGION_OPTIONS
+        ),
+    }
+)
+
 
 class HaWorkoutsConfigFlow(
     config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
@@ -112,6 +128,7 @@ class HaWorkoutsConfigFlow(
         super().__init__()
         self._email: str | None = None
         self._password: str | None = None
+        self._coros_region: str | None = None
         self._pending_oauth_data: dict[str, Any] | None = None
         self._pending_title: str | None = None
         self._apple_health_webhook_id: str | None = None
@@ -137,6 +154,8 @@ class HaWorkoutsConfigFlow(
                 return await self.async_step_garmin()
             if user_input[CONF_SOURCE_TYPE] == SOURCE_APPLE_HEALTH:
                 return await self.async_step_apple_health()
+            if user_input[CONF_SOURCE_TYPE] == SOURCE_COROS:
+                return await self.async_step_coros()
             return await self.async_step_pick_implementation()
 
         return self.async_show_form(step_id="user", data_schema=_SOURCE_PICKER_SCHEMA)
@@ -172,6 +191,43 @@ class HaWorkoutsConfigFlow(
 
         return self.async_show_form(
             step_id="garmin", data_schema=STEP_GARMIN_SCHEMA, errors=errors
+        )
+
+    # --- Coros: plain email/password form, plus a region picker ------------
+    # (a Coros login token is only valid on its own account's regional API
+    # host — see sources/coros.py's module docstring)
+
+    async def async_step_coros(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            email = user_input[CONF_EMAIL]
+            password = user_input[CONF_PASSWORD]
+            region = COROS_REGION_OPTIONS[user_input[CONF_COROS_REGION]]
+
+            await self.async_set_unique_id(f"{SOURCE_COROS}_{email.lower()}")
+            self._abort_if_unique_id_configured()
+
+            source = CorosSource(self.hass, email, password, region)
+            try:
+                await source.async_authenticate()
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Coros credentials")
+                errors["base"] = "unknown"
+            else:
+                self._email = email
+                self._password = password
+                self._coros_region = region
+                return await self.async_step_backfill()
+
+        return self.async_show_form(
+            step_id="coros", data_schema=_STEP_COROS_SCHEMA, errors=errors
         )
 
     # --- Apple Health: no auth, just generate & display a webhook URL ------
@@ -297,6 +353,19 @@ class HaWorkoutsConfigFlow(
                     data=self._pending_oauth_data,
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
+            if self._coros_region is not None:
+                return self.async_create_entry(
+                    # See the Garmin branch below for why this is deliberately
+                    # just "Coros", not "Coros (email)".
+                    title="Coros",
+                    data={
+                        CONF_SOURCE_TYPE: SOURCE_COROS,
+                        CONF_EMAIL: self._email,
+                        CONF_PASSWORD: self._password,
+                        CONF_COROS_REGION: self._coros_region,
+                    },
+                    options={CONF_BACKFILL_DAYS: backfill_days},
+                )
             return self.async_create_entry(
                 # Deliberately just "Garmin", not "Garmin (email)": this title
                 # becomes every entity's device name, and HA slugifies that
@@ -333,13 +402,14 @@ def _current_week_start_label(options: dict[str, Any]) -> str:
 class HaWorkoutsOptionsFlow(OptionsFlow):
     """Configure options after setup.
 
-    For Garmin/Strava: lets the user change how far back history is imported.
-    Increasing the depth triggers the coordinator to fetch and import only the
-    newly-uncovered older gap the next time it refreshes; it does not re-import
-    days already covered by existing statistics. For Garmin, the same depth
-    also drives the pace/splits backfill (see
+    For Garmin/Coros/Strava: lets the user change how far back history is
+    imported. Increasing the depth triggers the coordinator to fetch and
+    import only the newly-uncovered older gap the next time it refreshes; it
+    does not re-import days already covered by existing statistics. For
+    Garmin, the same depth also drives the pace/splits backfill (see
     activity_log.async_backfill_activity_splits) — deliberately one setting
-    for "how much history", not a separate control to configure twice.
+    for "how much history", not a separate control to configure twice. Coros
+    has no equivalent splits backfill yet (see sources/coros.py).
 
     Every source also gets a "week starts on" option, driving the
     week-to-date sensors (see period_sensors.py) — HA has no system-wide first-

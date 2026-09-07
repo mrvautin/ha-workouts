@@ -18,16 +18,20 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import (
+    CONF_COROS_REGION,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
+    DEFAULT_COROS_REGION,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
+    SOURCE_COROS,
     SOURCE_GARMIN,
     SOURCE_STRAVA,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
 from .sources.apple_health import AppleHealthSource
 from .sources.base import WorkoutSource
+from .sources.coros import CorosSource
 from .sources.garmin import GarminSource
 from .sources.strava import StravaSource
 
@@ -48,6 +52,13 @@ async def _build_source(hass: HomeAssistant, entry: ConfigEntry) -> WorkoutSourc
         return StravaSource(session)
     if source_type == SOURCE_APPLE_HEALTH:
         return AppleHealthSource()
+    if source_type == SOURCE_COROS:
+        return CorosSource(
+            hass,
+            entry.data[CONF_EMAIL],
+            entry.data[CONF_PASSWORD],
+            entry.data.get(CONF_COROS_REGION, DEFAULT_COROS_REGION),
+        )
     raise ValueError(f"Unknown source type: {source_type}")
 
 
