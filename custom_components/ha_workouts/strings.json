@@ -101,6 +101,24 @@
       "vo2_max": {
         "name": "VO2 max"
       },
+      "hrv_last_night_avg": {
+        "name": "HRV (last night)"
+      },
+      "hrv_weekly_avg": {
+        "name": "HRV (7-day average)"
+      },
+      "hrv_status": {
+        "name": "HRV status"
+      },
+      "training_readiness_score": {
+        "name": "Training readiness"
+      },
+      "training_readiness_level": {
+        "name": "Training readiness level"
+      },
+      "training_readiness_feedback": {
+        "name": "Training readiness feedback"
+      },
       "last_activity_name": {
         "name": "Last activity"
       },

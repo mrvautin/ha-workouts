@@ -79,6 +79,19 @@ class DailySummary:
     active_calories: float | None = None
     floors_climbed: int | None = None
     vo2_max: float | None = None
+    #: Last night's average HRV reading, in milliseconds (RMSSD) — Garmin's
+    #: own "last night" figure, not a same-day-so-far average.
+    hrv_last_night_avg: float | None = None
+    hrv_weekly_avg: float | None = None
+    #: Garmin's own qualitative bucket for the HRV reading above, e.g.
+    #: "BALANCED"/"UNBALANCED"/"LOW" — kept as the source's raw string rather
+    #: than normalized, since there's no other source to normalize against yet.
+    hrv_status: str | None = None
+    training_readiness_score: int | None = None
+    #: Garmin's own qualitative bucket, e.g. "PRIME"/"HIGH"/"MODERATE"/"LOW"/
+    #: "POOR" — kept as the source's raw string, same reasoning as hrv_status.
+    training_readiness_level: str | None = None
+    training_readiness_feedback: str | None = None
 
 
 @dataclass(slots=True)

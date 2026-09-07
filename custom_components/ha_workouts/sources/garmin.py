@@ -61,6 +61,42 @@ def _parse_vo2_max(max_metrics: list[dict[str, Any]] | None) -> float | None:
     return generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
 
 
+def _parse_hrv(raw: dict[str, Any] | None) -> tuple[float | None, float | None, str | None]:
+    """Extract (last_night_avg, weekly_avg, status) from get_hrv_data's response.
+
+    Returns all-None for a day with no overnight HRV reading yet (e.g. the
+    watch wasn't worn overnight, or hasn't synced) — get_hrv_data can return
+    an empty dict or one with no "hrvSummary" block in that case, which is
+    normal, not an error.
+    """
+    summary = (raw or {}).get("hrvSummary") or {}
+    return (
+        summary.get("lastNightAvg"),
+        summary.get("weeklyAvg"),
+        summary.get("status"),
+    )
+
+
+def _parse_training_readiness(
+    raw: list[dict[str, Any]] | None,
+) -> tuple[int | None, str | None, str | None]:
+    """Extract (score, level, feedback) from get_training_readiness's response.
+
+    The endpoint returns a list of readings for the day (one per recompute —
+    e.g. on wake-up, then again through the day as new data arrives), newest
+    first; [0] is always the most current. Empty/missing before the first
+    reading of the day is normal, not an error.
+    """
+    if not raw:
+        return None, None, None
+    latest = raw[0] or {}
+    return (
+        latest.get("score"),
+        latest.get("level"),
+        latest.get("feedbackShort"),
+    )
+
+
 def _parse_splits(raw: dict[str, Any] | None) -> list[ActivitySplit]:
     """Parse get_activity_splits' response into per-km/mile ActivitySplit records.
 
@@ -190,6 +226,12 @@ class GarminSource(WorkoutSource):
             raw_max_metrics = await self._hass.async_add_executor_job(
                 self._client.get_max_metrics, day_str
             )
+            raw_hrv = await self._hass.async_add_executor_job(
+                self._client.get_hrv_data, day_str
+            )
+            raw_training_readiness = await self._hass.async_add_executor_job(
+                self._client.get_training_readiness, day_str
+            )
         except GarminConnectAuthenticationError as err:
             # Session expired; force a fresh login on the next refresh.
             self._client = None
@@ -200,7 +242,9 @@ class GarminSource(WorkoutSource):
             raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
 
         activities = [self._parse_activity(item) for item in raw_activities or []]
-        summary = self._parse_daily_summary(raw_stats, target_day, raw_max_metrics)
+        summary = self._parse_daily_summary(
+            raw_stats, target_day, raw_max_metrics, raw_hrv, raw_training_readiness
+        )
 
         # Splits are one extra API call per activity — cheap here since a
         # single day's poll only ever returns a handful of new activities at
@@ -284,7 +328,13 @@ class GarminSource(WorkoutSource):
         stats: dict[str, Any],
         target_day: date,
         max_metrics: list[dict[str, Any]] | None,
+        hrv: dict[str, Any] | None,
+        training_readiness: list[dict[str, Any]] | None,
     ) -> DailySummary:
+        hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_hrv(hrv)
+        readiness_score, readiness_level, readiness_feedback = _parse_training_readiness(
+            training_readiness
+        )
         return DailySummary(
             source=self.key,
             day=target_day,
@@ -296,6 +346,12 @@ class GarminSource(WorkoutSource):
             body_battery_max=stats.get("bodyBatteryHighestValue"),
             body_battery_min=stats.get("bodyBatteryLowestValue"),
             vo2_max=_parse_vo2_max(max_metrics),
+            hrv_last_night_avg=hrv_last_night_avg,
+            hrv_weekly_avg=hrv_weekly_avg,
+            hrv_status=hrv_status,
+            training_readiness_score=readiness_score,
+            training_readiness_level=readiness_level,
+            training_readiness_feedback=readiness_feedback,
         )
 
     @classmethod

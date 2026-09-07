@@ -115,6 +115,51 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
         suggested_display_precision=1,
         value_fn=lambda data: data.daily_summary.vo2_max if data.daily_summary else None,
     ),
+    WorkoutSensorDescription(
+        key="hrv_last_night_avg",
+        translation_key="hrv_last_night_avg",
+        native_unit_of_measurement="ms",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.hrv_last_night_avg if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="hrv_weekly_avg",
+        translation_key="hrv_weekly_avg",
+        native_unit_of_measurement="ms",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.hrv_weekly_avg if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="hrv_status",
+        translation_key="hrv_status",
+        value_fn=lambda data: data.daily_summary.hrv_status if data.daily_summary else None,
+    ),
+    WorkoutSensorDescription(
+        key="training_readiness_score",
+        translation_key="training_readiness_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_score if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_readiness_level",
+        translation_key="training_readiness_level",
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_level if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_readiness_feedback",
+        translation_key="training_readiness_feedback",
+        value_fn=lambda data: (
+            data.daily_summary.training_readiness_feedback if data.daily_summary else None
+        ),
+    ),
 )
 
 #: "Last activity" sensors — meaningful for any source that reports activities
