@@ -35,6 +35,10 @@ from homeassistant.helpers.selector import (
 from .const import (
     BACKFILL_DAYS_OPTIONS,
     CONF_BACKFILL_DAYS,
+    CONF_COROS_MCP_ACCESS_TOKEN,
+    CONF_COROS_MCP_CLIENT_ID,
+    CONF_COROS_MCP_EXPIRES_AT,
+    CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
@@ -52,6 +56,7 @@ from .const import (
 )
 from .sources.base import WorkoutSourceAuthError, WorkoutSourceError
 from .sources.coros import CorosSource
+from .sources.coros_mcp import CorosMcpClient, McpTokenSet
 from .sources.garmin import GarminSource
 
 _LOGGER = logging.getLogger(__name__)
@@ -111,6 +116,12 @@ _STEP_COROS_SCHEMA = vol.Schema(
     }
 )
 
+#: Not a HA-provided const (there's no CONF_ equivalent for an ad hoc
+#: boolean field) — deliberately a plain string local to this module.
+_CONNECT_MCP_FIELD = "connect_mcp"
+
+_STEP_COROS_MCP_SCHEMA = vol.Schema({vol.Required(_CONNECT_MCP_FIELD, default=True): bool})
+
 
 class HaWorkoutsConfigFlow(
     config_entry_oauth2_flow.AbstractOAuth2FlowHandler, domain=DOMAIN
@@ -129,6 +140,7 @@ class HaWorkoutsConfigFlow(
         self._email: str | None = None
         self._password: str | None = None
         self._coros_region: str | None = None
+        self._coros_mcp_tokens: McpTokenSet | None = None
         self._pending_oauth_data: dict[str, Any] | None = None
         self._pending_title: str | None = None
         self._apple_health_webhook_id: str | None = None
@@ -224,10 +236,48 @@ class HaWorkoutsConfigFlow(
                 self._email = email
                 self._password = password
                 self._coros_region = region
-                return await self.async_step_backfill()
+                return await self.async_step_coros_mcp()
 
         return self.async_show_form(
             step_id="coros", data_schema=_STEP_COROS_SCHEMA, errors=errors
+        )
+
+    # --- Coros MCP: optional second connection for steps/sleep/recovery/---
+    # --- fitness assessment/training load (see sources/coros_mcp.py) ------
+
+    async def async_step_coros_mcp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Offer to also connect Coros MCP, using the SAME email/password
+        already collected in async_step_coros — a different login mechanism
+        against the same account (see sources/coros_mcp.py's module
+        docstring), not a second set of credentials to ask for.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            if not user_input.get(_CONNECT_MCP_FIELD, False):
+                return await self.async_step_backfill()
+
+            assert self._email is not None
+            assert self._password is not None
+            session = async_get_clientsession(self.hass)
+            mcp_client = CorosMcpClient(session)
+            try:
+                tokens = await mcp_client.async_login(self._email, self._password)
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error connecting Coros MCP")
+                errors["base"] = "unknown"
+            else:
+                self._coros_mcp_tokens = tokens
+                return await self.async_step_backfill()
+
+        return self.async_show_form(
+            step_id="coros_mcp", data_schema=_STEP_COROS_MCP_SCHEMA, errors=errors
         )
 
     # --- Apple Health: no auth, just generate & display a webhook URL ------
@@ -354,16 +404,22 @@ class HaWorkoutsConfigFlow(
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
             if self._coros_region is not None:
+                data: dict[str, Any] = {
+                    CONF_SOURCE_TYPE: SOURCE_COROS,
+                    CONF_EMAIL: self._email,
+                    CONF_PASSWORD: self._password,
+                    CONF_COROS_REGION: self._coros_region,
+                }
+                if self._coros_mcp_tokens is not None:
+                    data[CONF_COROS_MCP_CLIENT_ID] = self._coros_mcp_tokens.client_id
+                    data[CONF_COROS_MCP_ACCESS_TOKEN] = self._coros_mcp_tokens.access_token
+                    data[CONF_COROS_MCP_REFRESH_TOKEN] = self._coros_mcp_tokens.refresh_token
+                    data[CONF_COROS_MCP_EXPIRES_AT] = self._coros_mcp_tokens.expires_at_epoch
                 return self.async_create_entry(
                     # See the Garmin branch below for why this is deliberately
                     # just "Coros", not "Coros (email)".
                     title="Coros",
-                    data={
-                        CONF_SOURCE_TYPE: SOURCE_COROS,
-                        CONF_EMAIL: self._email,
-                        CONF_PASSWORD: self._password,
-                        CONF_COROS_REGION: self._coros_region,
-                    },
+                    data=data,
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
             return self.async_create_entry(
@@ -423,6 +479,14 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
     during setup.
     """
 
+    def __init__(self) -> None:
+        super().__init__()
+        # Held between async_step_init and async_step_connect_coros_mcp
+        # (Coros-only, MCP-connect sub-step) so the backfill/week-start
+        # choice already made isn't lost while that extra step runs.
+        self._pending_backfill_days: int | None = None
+        self._pending_week_start_day: int | None = None
+
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
@@ -432,6 +496,10 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
         if user_input is not None:
             backfill_days = BACKFILL_DAYS_OPTIONS[user_input[CONF_BACKFILL_DAYS]]
             week_start_day = WEEK_START_DAY_OPTIONS[user_input[CONF_WEEK_START_DAY]]
+            if user_input.get(_CONNECT_MCP_FIELD):
+                self._pending_backfill_days = backfill_days
+                self._pending_week_start_day = week_start_day
+                return await self.async_step_connect_coros_mcp()
             return self.async_create_entry(
                 data={
                     CONF_BACKFILL_DAYS: backfill_days,
@@ -446,18 +514,70 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
             (label for label, days in BACKFILL_DAYS_OPTIONS.items() if days == current_days),
             "1 year",
         )
-        schema = vol.Schema(
-            {
-                vol.Required(
-                    CONF_BACKFILL_DAYS, default=current_backfill_label
-                ): _label_selector(BACKFILL_DAYS_OPTIONS),
-                vol.Required(
-                    CONF_WEEK_START_DAY,
-                    default=_current_week_start_label(self.config_entry.options),
-                ): _label_selector(WEEK_START_DAY_OPTIONS),
-            }
-        )
-        return self.async_show_form(step_id="init", data_schema=schema)
+        schema_fields = {
+            vol.Required(
+                CONF_BACKFILL_DAYS, default=current_backfill_label
+            ): _label_selector(BACKFILL_DAYS_OPTIONS),
+            vol.Required(
+                CONF_WEEK_START_DAY,
+                default=_current_week_start_label(self.config_entry.options),
+            ): _label_selector(WEEK_START_DAY_OPTIONS),
+        }
+        # Offer to connect Coros MCP here too — not just at initial setup
+        # (async_step_coros_mcp) — for a Coros entry that skipped it then,
+        # or was created before this option existed at all. Not shown once
+        # already connected: nothing more to offer, and reconnecting isn't
+        # a meaningful action (see async_step_connect_coros_mcp).
+        if (
+            self.config_entry.data.get(CONF_SOURCE_TYPE) == SOURCE_COROS
+            and self.config_entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN) is None
+        ):
+            schema_fields[vol.Optional(_CONNECT_MCP_FIELD, default=False)] = bool
+        return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_fields))
+
+    async def async_step_connect_coros_mcp(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Connect Coros MCP to an EXISTING entry from Reconfigure — the
+        options-flow counterpart to async_step_coros_mcp (initial setup),
+        reusing the email/password already stored on the entry rather than
+        asking again.
+        """
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            session = async_get_clientsession(self.hass)
+            mcp_client = CorosMcpClient(session)
+            try:
+                tokens = await mcp_client.async_login(
+                    self.config_entry.data[CONF_EMAIL], self.config_entry.data[CONF_PASSWORD]
+                )
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error connecting Coros MCP")
+                errors["base"] = "unknown"
+            else:
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data={
+                        **self.config_entry.data,
+                        CONF_COROS_MCP_CLIENT_ID: tokens.client_id,
+                        CONF_COROS_MCP_ACCESS_TOKEN: tokens.access_token,
+                        CONF_COROS_MCP_REFRESH_TOKEN: tokens.refresh_token,
+                        CONF_COROS_MCP_EXPIRES_AT: tokens.expires_at_epoch,
+                    },
+                )
+                return self.async_create_entry(
+                    data={
+                        CONF_BACKFILL_DAYS: self._pending_backfill_days,
+                        CONF_WEEK_START_DAY: self._pending_week_start_day,
+                    }
+                )
+
+        return self.async_show_form(step_id="connect_coros_mcp", errors=errors)
 
     async def async_step_apple_health_webhook(
         self, user_input: dict[str, Any] | None = None

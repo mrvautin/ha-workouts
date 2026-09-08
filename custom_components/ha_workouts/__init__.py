@@ -14,10 +14,14 @@ from aiohttp import web
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_entry_oauth2_flow
 
 from .const import (
+    CONF_COROS_MCP_ACCESS_TOKEN,
+    CONF_COROS_MCP_CLIENT_ID,
+    CONF_COROS_MCP_EXPIRES_AT,
+    CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
@@ -32,6 +36,7 @@ from .coordinator import WorkoutDataUpdateCoordinator
 from .sources.apple_health import AppleHealthSource
 from .sources.base import WorkoutSource
 from .sources.coros import CorosSource
+from .sources.coros_mcp import McpTokenSet
 from .sources.garmin import GarminSource
 from .sources.strava import StravaSource
 
@@ -58,8 +63,46 @@ async def _build_source(hass: HomeAssistant, entry: ConfigEntry) -> WorkoutSourc
             entry.data[CONF_EMAIL],
             entry.data[CONF_PASSWORD],
             entry.data.get(CONF_COROS_REGION, DEFAULT_COROS_REGION),
+            mcp_tokens=_mcp_tokens_from_entry(entry),
+            mcp_token_update_callback=lambda tokens: _async_persist_mcp_tokens(
+                hass, entry, tokens
+            ),
         )
     raise ValueError(f"Unknown source type: {source_type}")
+
+
+def _mcp_tokens_from_entry(entry: ConfigEntry) -> McpTokenSet | None:
+    """Build an McpTokenSet from config entry data, or None if the user
+    never connected Coros MCP (see const.py's CONF_COROS_MCP_* docstring)."""
+    access_token = entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN)
+    if access_token is None:
+        return None
+    return McpTokenSet(
+        access_token=access_token,
+        refresh_token=entry.data[CONF_COROS_MCP_REFRESH_TOKEN],
+        expires_at_epoch=entry.data[CONF_COROS_MCP_EXPIRES_AT],
+        client_id=entry.data[CONF_COROS_MCP_CLIENT_ID],
+    )
+
+
+@callback
+def _async_persist_mcp_tokens(hass: HomeAssistant, entry: ConfigEntry, tokens: McpTokenSet) -> None:
+    """Called by CorosSource whenever it refreshes its MCP token — Coros's
+    refresh tokens are one-time-use (confirmed by earlier research on this
+    OAuth program), so the new pair must be saved immediately or a restart
+    between refreshes would retry an already-dead refresh_token and
+    permanently lock the user out of MCP until they reconnect it.
+    """
+    hass.config_entries.async_update_entry(
+        entry,
+        data={
+            **entry.data,
+            CONF_COROS_MCP_CLIENT_ID: tokens.client_id,
+            CONF_COROS_MCP_ACCESS_TOKEN: tokens.access_token,
+            CONF_COROS_MCP_REFRESH_TOKEN: tokens.refresh_token,
+            CONF_COROS_MCP_EXPIRES_AT: tokens.expires_at_epoch,
+        },
+    )
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

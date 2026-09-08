@@ -26,6 +26,7 @@ from .activity_log import async_backfill_activity_splits
 from .backfill_progress import BackfillProgress
 from .const import (
     CONF_BACKFILL_DAYS,
+    CONF_COROS_MCP_ACCESS_TOKEN,
     CONF_SOURCE_TYPE,
     CONF_WEEK_START_DAY,
     DEFAULT_BACKFILL_DAYS,
@@ -172,6 +173,109 @@ HRV_SENSORS: tuple[WorkoutSensorDescription, ...] = (
     ),
 )
 
+#: Sensors backed by Coros MCP (see sources/coros_mcp.py) — an OPTIONAL
+#: second connection a Coros entry may or may not have (see
+#: config_flow.py's async_step_coros_mcp); added per-entry in
+#: async_setup_entry below based on whether THIS entry actually has MCP
+#: tokens, not a static source-type set like SOURCES_WITH_DAILY_SUMMARY/
+#: SOURCES_WITH_HRV above, since two different Coros entries could differ.
+COROS_MCP_SENSORS: tuple[WorkoutSensorDescription, ...] = (
+    WorkoutSensorDescription(
+        key="steps",
+        translation_key="steps",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: data.daily_summary.steps if data.daily_summary else None,
+    ),
+    WorkoutSensorDescription(
+        key="active_calories",
+        translation_key="active_calories",
+        native_unit_of_measurement="kcal",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: (
+            data.daily_summary.active_calories if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="sleep_score",
+        translation_key="sleep_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.daily_summary.sleep_score if data.daily_summary else None,
+    ),
+    WorkoutSensorDescription(
+        key="sleep_duration",
+        translation_key="sleep_duration",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            round(data.daily_summary.sleep_seconds / 60, 1)
+            if data.daily_summary and data.daily_summary.sleep_seconds is not None
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="recovery_percent",
+        translation_key="recovery_percent",
+        native_unit_of_measurement="%",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.recovery_percent if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="recovery_level",
+        translation_key="recovery_level",
+        value_fn=lambda data: (
+            data.daily_summary.recovery_level if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="recovery_estimated_full_hours",
+        translation_key="recovery_estimated_full_hours",
+        native_unit_of_measurement="h",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.recovery_estimated_full_hours if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_load_short_term",
+        translation_key="training_load_short_term",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.training_load_short_term if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="training_load_long_term",
+        translation_key="training_load_long_term",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.training_load_long_term if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="fitness_threshold_pace",
+        translation_key="fitness_threshold_pace",
+        native_unit_of_measurement="s/km",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.fitness_assessment.threshold_pace_seconds_per_km
+            if data.fitness_assessment
+            else None
+        ),
+    ),
+    # VO2max, Running Performance, and the four race predictions are
+    # deliberately NOT exposed as sensors: confirmed by directly calling
+    # queryFitnessAssessmentOverview against a real account (whose Coros
+    # phone app clearly shows all of these — VO2max, a Running Fitness
+    # score, race predictions) that the MCP tool itself only ever returned
+    # Threshold Pace, nothing else — a real gap in Coros's own API, not a
+    # parsing bug (FitnessAssessment/parse_fitness_assessment in
+    # coros_mcp_parsers.py already handle these fields correctly whenever
+    # Coros's API does start returning them; no code change needed if that
+    # ever happens, just re-add the sensor descriptions here).
+)
+
 #: "Last activity" sensors — meaningful for any source that reports activities
 #: at all, including Apple Health (once at least one workout has been pushed).
 LAST_ACTIVITY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
@@ -315,6 +419,11 @@ async def async_setup_entry(
     # in SOURCES_WITH_HRV without being in SOURCES_WITH_DAILY_SUMMARY.
     if source_type in SOURCES_WITH_HRV:
         summary_descriptions = list(HRV_SENSORS) + summary_descriptions
+    # Per-entry, not per-source-type: whether THIS Coros entry has MCP
+    # connected (see config_flow.py's async_step_coros_mcp) — a user can
+    # have a Coros entry with or without it.
+    if source_type == SOURCE_COROS and entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN) is not None:
+        summary_descriptions = list(COROS_MCP_SENSORS) + summary_descriptions
 
     entities: list[SensorEntity] = [
         WorkoutSensor(coordinator, entry, description) for description in summary_descriptions

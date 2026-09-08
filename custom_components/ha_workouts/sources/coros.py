@@ -12,11 +12,11 @@ Login: POST /account/login with {"account": email, "accountType": 2,
 "pwd": md5(password)}. Coros also runs an official OAuth2 + MCP program
 ("COROS MCP", support.coros.com) requiring no app registration on our part
 — but its MCP server returns free-form prose text instead of structured
-JSON for every tool call, and its main activity-listing tool has a
-documented ~40-50% spurious-404 failure rate on fresh sessions. Parsing
-prose reliably and working around an undocumented flaky endpoint was
-judged more fragile long-term than this REST API's plain, stable JSON
-shape, even accepting this route's own known tradeoff: logging in here
+JSON for every tool call, and its activity-listing tool has a documented
+~40-50% spurious-404 failure rate on fresh sessions. Parsing prose reliably
+and working around an undocumented flaky endpoint was judged more fragile
+long-term than this REST API's plain, stable JSON shape for activities —
+even accepting this route's own known tradeoff: logging in here
 invalidates the user's own Coros app/web session, and vice versa (Coros's
 Training Hub allows only one active session per account). Nothing to be
 done about that from this side — it's how Coros's session model works.
@@ -25,12 +25,22 @@ A token from one region is REJECTED by the other regions' hosts even
 though login itself succeeds against any of them — so the account's real
 region has to be configured (see const.CONF_COROS_REGION), not
 auto-detected.
+
+Training Hub has no equivalent AT ALL for several real Coros features —
+steps, sleep, HRV assessment, recovery status, fitness assessment (VO2max/
+race predictions), training load — confirmed absent by direct probing.
+Those come from the MCP program instead (see sources/coros_mcp.py), used
+here ONLY for this handful of tools that don't touch the flaky/prose-heavy
+parts avoided above. MCP is an entirely separate, OPTIONAL login on the
+same Coros account — connecting it does not affect, and is not affected
+by, the Training Hub session above.
 """
 from __future__ import annotations
 
 import asyncio
 import hashlib
 import logging
+from collections.abc import Callable
 from datetime import date, datetime, timezone
 from typing import Any
 
@@ -38,13 +48,22 @@ import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from ..models import Activity, ActivitySplit, ActivityType, DailySummary, WorkoutData
+from ..models import (
+    Activity,
+    ActivitySplit,
+    ActivityType,
+    DailySummary,
+    FitnessAssessment,
+    WorkoutData,
+)
+from . import coros_mcp_parsers
 from .base import (
     WorkoutSource,
     WorkoutSourceAuthError,
     WorkoutSourceError,
     WorkoutSourceRateLimitedError,
 )
+from .coros_mcp import CorosMcpClient, McpTokenSet
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -115,7 +134,16 @@ class CorosSource(WorkoutSource):
     # target, so pace conservatively.
     backfill_chunk_pause_seconds = 20.0
 
-    def __init__(self, hass: HomeAssistant, email: str, password: str, region: str) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        email: str,
+        password: str,
+        region: str,
+        *,
+        mcp_tokens: McpTokenSet | None = None,
+        mcp_token_update_callback: Callable[[McpTokenSet], None] | None = None,
+    ) -> None:
         self._hass = hass
         self._email = email
         self._password = password
@@ -129,6 +157,16 @@ class CorosSource(WorkoutSource):
         # logins must be serialized rather than each independently racing
         # Coros's login endpoint.
         self._auth_lock = asyncio.Lock()
+
+        # MCP (see sources/coros_mcp.py) is an entirely separate, OPTIONAL
+        # connection — mcp_tokens is None whenever the user hasn't connected
+        # it, in which case _fetch_mcp_summary below is simply skipped. Uses
+        # the same shared HA session as _client() (see that method's own
+        # comment for why); CorosMcpClient itself owns no connection.
+        self._mcp_client = CorosMcpClient(self._client())
+        self._mcp_tokens = mcp_tokens
+        self._mcp_token_update_callback = mcp_token_update_callback
+        self._mcp_lock = asyncio.Lock()
 
     def _client(self) -> aiohttp.ClientSession:
         # HA's shared session (one per hass instance, closed by HA itself on
@@ -235,29 +273,134 @@ class CorosSource(WorkoutSource):
             activity.splits = await self.async_fetch_splits(
                 activity.source_id, _activity_sport_type(activity)
             )
-        # Coros's dashboard endpoint has no date parameter — it always
-        # answers for "now", unlike the activity list above — so this is
-        # only ever meaningful for today's live poll, never the historical
+        # Both summary sources below have no date parameter — they always
+        # answer for "now", unlike the activity list above — so this whole
+        # block only ever runs for today's live poll, never the historical
         # backfill range (see async_fetch_activities_range, which never
-        # calls this). No equivalent of Garmin's steps/resting-HR/body
-        # battery here — only HRV, and only if the account's watch model
-        # actually records overnight HRV at all (see _parse_dashboard).
+        # calls either).
         summary = await self._fetch_daily_summary(target_day)
-        return WorkoutData(activities=activities, daily_summary=summary)
+        fitness_assessment = await self._fetch_fitness_assessment()
+        return WorkoutData(
+            activities=activities,
+            daily_summary=summary,
+            fitness_assessment=fitness_assessment,
+        )
 
     async def _fetch_daily_summary(self, target_day: date) -> DailySummary | None:
+        """Merge Training Hub's dashboard HRV with MCP's richer daily
+        health/sleep/HRV/recovery/training-load data (see module docstring
+        for why both exist) into a single DailySummary — WorkoutData only
+        ever carries one.
+
+        MCP's own official querySleepHrv, when connected and it has data,
+        takes priority over Training Hub's rough dashboard-derived HRV
+        (values below are overwritten, not merged field-by-field) — it's
+        Coros's own assessed figure, not this integration's derived one.
+        """
         body = await self._request("GET", "/dashboard/query")
         summary_info = (body.get("data") or {}).get("summaryInfo") or {}
         hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_dashboard_hrv(summary_info)
-        if hrv_last_night_avg is None and hrv_weekly_avg is None and hrv_status is None:
+        summary = None
+        if hrv_last_night_avg is not None or hrv_weekly_avg is not None or hrv_status is not None:
+            summary = DailySummary(
+                source=self.key,
+                day=target_day,
+                hrv_last_night_avg=hrv_last_night_avg,
+                hrv_weekly_avg=hrv_weekly_avg,
+                hrv_status=hrv_status,
+            )
+
+        for mcp_summary in await self._fetch_mcp_daily_summaries(target_day):
+            summary = _merge_daily_summaries(summary, mcp_summary, self.key, target_day)
+        return summary
+
+    async def _fetch_mcp_daily_summaries(self, target_day: date) -> list[DailySummary]:
+        """Call every connected-MCP daily-summary tool and parse each
+        response — empty list if MCP isn't connected (self._mcp_tokens is
+        None) or every tool came back with nothing parseable, which is
+        normal (e.g. no watch, nothing synced yet), not an error.
+        """
+        if self._mcp_tokens is None:
+            return []
+        summaries: list[DailySummary] = []
+        for tool_name, args, parser in (
+            ("queryDailyHealthData", {"days": 3}, coros_mcp_parsers.parse_daily_health_data),
+            (
+                "querySleepData",
+                {
+                    "startDate": target_day.strftime("%Y%m%d"),
+                    "endDate": target_day.strftime("%Y%m%d"),
+                    "days": 7,
+                },
+                coros_mcp_parsers.parse_sleep_data,
+            ),
+            (
+                "querySleepHrv",
+                {
+                    "startDate": target_day.strftime("%Y%m%d"),
+                    "endDate": target_day.strftime("%Y%m%d"),
+                    "days": 7,
+                },
+                coros_mcp_parsers.parse_sleep_hrv,
+            ),
+            ("queryRecoveryStatus", {}, coros_mcp_parsers.parse_recovery_status),
+            (
+                "queryTrainingLoadAssessment",
+                {"days": 3},
+                coros_mcp_parsers.parse_training_load,
+            ),
+        ):
+            text = await self._call_mcp_tool(tool_name, args)
+            if text is None:
+                continue
+            parsed = parser(self.key, target_day, text)
+            if parsed is not None:
+                summaries.append(parsed)
+        return summaries
+
+    async def _fetch_fitness_assessment(self) -> FitnessAssessment | None:
+        if self._mcp_tokens is None:
             return None
-        return DailySummary(
-            source=self.key,
-            day=target_day,
-            hrv_last_night_avg=hrv_last_night_avg,
-            hrv_weekly_avg=hrv_weekly_avg,
-            hrv_status=hrv_status,
-        )
+        text = await self._call_mcp_tool("queryFitnessAssessmentOverview", {})
+        if text is None:
+            return None
+        return coros_mcp_parsers.parse_fitness_assessment(self.key, text)
+
+    async def _call_mcp_tool(self, tool_name: str, arguments: dict[str, Any]) -> str | None:
+        """Call one MCP tool, refreshing the token first if it's expired.
+
+        Returns None (rather than raising) on any MCP-specific failure —
+        MCP is optional supplementary data; a problem with it should never
+        take down the whole Coros source's live poll, which still needs to
+        report today's activities either way.
+        """
+        async with self._mcp_lock:
+            if self._mcp_tokens is None:
+                return None
+            if self._mcp_tokens.is_expired():
+                try:
+                    self._mcp_tokens = await self._mcp_client.async_refresh(self._mcp_tokens)
+                except WorkoutSourceError:
+                    _LOGGER.warning(
+                        "Coros MCP token refresh failed for %s; skipping MCP data this poll",
+                        self.key,
+                        exc_info=True,
+                    )
+                    return None
+                if self._mcp_token_update_callback is not None:
+                    self._mcp_token_update_callback(self._mcp_tokens)
+            tokens = self._mcp_tokens
+
+        try:
+            return await self._mcp_client.async_call_tool(tokens, tool_name, arguments)
+        except WorkoutSourceError:
+            _LOGGER.warning(
+                "Coros MCP call to %s failed for %s; skipping this data this poll",
+                tool_name,
+                self.key,
+                exc_info=True,
+            )
+            return None
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date
@@ -384,6 +527,52 @@ def _parse_dashboard_hrv(
     last_night_avg = readings[-1]
     weekly_avg = sum(readings) / len(readings)
     return last_night_avg, weekly_avg, None
+
+
+def _merge_daily_summaries(
+    base: DailySummary | None, new: DailySummary, source: str, day: date
+) -> DailySummary:
+    """Fold new's non-None fields onto base (or create a fresh DailySummary
+    if base is None) — used to combine Training Hub's dashboard HRV with
+    each of MCP's several daily-summary tool calls into one DailySummary,
+    since WorkoutData only ever carries a single daily_summary.
+
+    new's hrv_* fields always win over base's when new has any (see
+    _fetch_daily_summary's docstring: MCP's official querySleepHrv is
+    intentionally treated as authoritative over Training Hub's rough
+    dashboard-derived figure) — every other field is a plain "new wins if
+    present" merge, since no other field is ever populated by more than one
+    of the calls this is used to fold together.
+    """
+    if base is None:
+        return new
+    for field_name in (
+        "steps",
+        "resting_heart_rate",
+        "sleep_seconds",
+        "stress_avg",
+        "body_battery_max",
+        "body_battery_min",
+        "active_calories",
+        "floors_climbed",
+        "vo2_max",
+        "hrv_last_night_avg",
+        "hrv_weekly_avg",
+        "hrv_status",
+        "training_readiness_score",
+        "training_readiness_level",
+        "training_readiness_feedback",
+        "sleep_score",
+        "recovery_level",
+        "recovery_percent",
+        "recovery_estimated_full_hours",
+        "training_load_short_term",
+        "training_load_long_term",
+    ):
+        new_value = getattr(new, field_name)
+        if new_value is not None:
+            setattr(base, field_name, new_value)
+    return base
 
 
 def _parse_splits(lap_dtos: list[dict[str, Any]]) -> list[ActivitySplit]:

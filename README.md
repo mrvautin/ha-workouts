@@ -1,19 +1,24 @@
 # HA Workouts
 
 A Home Assistant custom integration (HACS) that pulls workout and daily health
-data from Garmin, Strava, and/or Apple Health and exposes it as sensors, with
-long-term statistics for charting aggregated activity over time — monthly
-running distance, year-to-date totals, year-over-year comparisons, and so on.
+data from Garmin, Coros, Strava, and/or Apple Health and exposes it as
+sensors, with long-term statistics for charting aggregated activity over
+time — monthly running distance, year-to-date totals, year-over-year
+comparisons, and so on.
 
-You can add Garmin, Strava, Apple Health, or any combination — each is a
-separate config entry with its own source-prefixed sensors
-(`sensor.garmin_*`, `sensor.strava_*`, `sensor.apple_health_*`), so data from
-each source can be charted separately or side by side.
+You can add Garmin, Coros, Strava, Apple Health, or any combination — each is
+a separate config entry with its own source-prefixed sensors
+(`sensor.garmin_*`, `sensor.coros_*`, `sensor.strava_*`,
+`sensor.apple_health_*`), so data from each source can be charted separately
+or side by side.
 
 ## Supported sources
 
 - **Garmin Connect** — email/password login (unofficial API, no developer
   account required).
+- **Coros** — email/password login (unofficial API, no developer account
+  required), plus an optional second connection for steps/sleep/HRV/recovery/
+  fitness assessment/training load (see [Coros setup](#coros-setup) below).
 - **Strava** — OAuth2, using your own Strava API application (see [Strava
   setup](#strava-setup) below). **As of Strava's June 2026 developer program
   change, this requires an active paid Strava subscription ($11.99/mo) on the
@@ -25,9 +30,9 @@ each source can be charted separately or side by side.
   [Apple Health setup](#apple-health-setup) below). Apple doesn't offer a
   cloud API for Health data, so this works by receiving workouts from your
   phone rather than pulling them. There's no depth setting to choose like
-  Garmin/Strava's backfill — instead, the Shortcut's "Get Workouts" action
-  returns your full on-device workout history the first time it runs, so
-  your existing history arrives all at once as soon as you run it.
+  Garmin/Coros/Strava's backfill — instead, the Shortcut's "Get Workouts"
+  action returns your full on-device workout history the first time it runs,
+  so your existing history arrives all at once as soon as you run it.
 - Google Fit / Fitbit — not yet supported.
 
 ## Installation
@@ -37,10 +42,11 @@ each source can be charted separately or side by side.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration**, search for
    "HA Workouts".
-4. Choose a source (Garmin, Strava, or Apple Health) and follow the prompts —
-   see [Garmin setup](#garmin-setup) / [Strava setup](#strava-setup) /
-   [Apple Health setup](#apple-health-setup) below.
-5. For Garmin and Strava: choose how far back to import history. This
+4. Choose a source (Garmin, Coros, Strava, or Apple Health) and follow the
+   prompts — see [Garmin setup](#garmin-setup) / [Coros setup](#coros-setup) /
+   [Strava setup](#strava-setup) / [Apple Health setup](#apple-health-setup)
+   below.
+5. For Garmin, Coros, and Strava: choose how far back to import history. This
    backfill runs in the background after setup finishes — for several years
    of history it can take several minutes (see
    [History backfill](#history-backfill) below) — and can be extended later
@@ -49,7 +55,7 @@ each source can be charted separately or side by side.
    [Apple Health setup](#apple-health-setup) below for how its history
    arrives instead.)
 6. To add another source, repeat from step 3 (e.g. add Garmin, then run
-   setup again and add Strava and/or Apple Health).
+   setup again and add Coros, Strava, and/or Apple Health).
 
 ### Garmin setup
 
@@ -60,6 +66,65 @@ the same way the Garmin Connect app does.
 Garmin's API is unofficial and undocumented, so this integration is
 deliberately conservative about request pacing to avoid tripping its rate
 limits (see [Rate limits](#rate-limits--why-things-might-be-slow) below).
+
+### Coros setup
+
+Enter your Coros account email and password — no developer account or API key
+needed. This uses the same unofficial API Coros's own `training.coros.com`
+web dashboard uses to sign in.
+
+**Region:** you'll be asked to pick Global (default), Europe, or China.
+Almost every account, regardless of where you actually live, uses **Global**
+— Europe and China are genuine exceptions for accounts specifically
+registered there. If setup fails after picking one, try Global first, then
+the other two.
+
+**Important — logging in here signs you out of the Coros app.** Coros only
+allows one active session per account, so connecting here will sign you out
+of the Coros phone app/Training Hub website, and logging into either of
+those later will sign this integration back out in turn. This isn't
+something this integration can avoid — it's how Coros's own session system
+works. If that's not acceptable, this Coros source may not be a good fit for
+you; there's no bundled/shared workaround.
+
+#### Optional: Coros health & fitness data (steps, sleep, HRV, recovery, training load)
+
+Coros's activity data (distance, pace, splits — the part set up above) comes
+from a completely different part of their systems than steps, sleep, HRV,
+recovery status, fitness assessment, and training load. Those need a
+**second, separate connection** — Coros's official "COROS MCP" program —
+using the same email/password, but a genuinely different login mechanism
+that does **not** sign you out of anything (no session conflict with either
+the connection above or the Coros app).
+
+You'll be offered this as an extra step right after entering your Coros
+credentials during setup ("Connect Coros health & fitness data") — tick the
+box to connect it there and then, or skip it and connect it later from
+**Configure** on the Coros integration entry (a checkbox appears there for
+as long as it isn't connected yet).
+
+This unlocks these additional sensors, none of which any other source in
+this integration provides:
+
+- `sensor.coros_steps`, `sensor.coros_active_calories`
+- `sensor.coros_sleep_score`, `sensor.coros_sleep_duration`
+- `sensor.coros_recovery`, `sensor.coros_recovery_level`,
+  `sensor.coros_estimated_full_recovery`
+- `sensor.coros_training_load_short_term`, `sensor.coros_training_load_long_term`
+- `sensor.coros_threshold_pace`
+
+**Note on what's *not* included:** Coros's own phone app shows a VO2max
+estimate and race-time predictions (5K/10K/half/full marathon) under
+"Running Fitness." As of this integration's testing, Coros's own official
+API doesn't return those specific figures yet, even though the app clearly
+has them — this is a gap in Coros's API, not something this integration can
+work around, so no sensors are offered for them. If Coros starts exposing
+that data, sensors for it can be added without any other changes.
+
+Any of these can legitimately show "unknown" rather than a number — e.g. HRV
+if your specific watch model doesn't record it overnight, or steps if you
+don't wear the watch day-to-day. That's Coros genuinely having nothing to
+report, not a fault in the integration.
 
 ### Strava setup
 
@@ -126,7 +191,7 @@ your phone pushes each workout to it.
    appear and start reporting. Since Toolbox Pro's **Get Workouts** returns
    your full on-device workout history (not just new workouts), the first run
    typically posts your whole existing history in one go — there's no
-   separate backfill step to configure like Garmin/Strava.
+   separate backfill step to configure like Garmin/Coros/Strava.
 6. Optional - Create an automation to run every `x` days to run the shortcut to keep your data updated. Alternatively, create an automation to run the shortcut whenever you complete a workout.
 
 Get the workouts
@@ -139,18 +204,25 @@ Setting up the data (make sure all fields are `Text`)
 
 ## Data exposed
 
-- **Daily summary sensors** (Garmin only — Strava and Apple Health have no
+- **Daily summary sensors** (Garmin only — Coros/Strava/Apple Health have no
   equivalent): steps, resting heart rate, active calories, floors climbed,
-  average stress, body battery.
+  average stress, body battery, VO2 max, HRV (last night average, 7-day
+  average, status), and Training Readiness (score, level, feedback).
+- **Coros health & fitness sensors** (only if you connected the optional
+  second MCP connection — see [Coros setup](#coros-setup)): steps, active
+  calories, sleep score/duration, HRV (last night/7-day average), recovery
+  (percent, level, estimated full recovery time), training load
+  (short-term/long-term), threshold pace.
 - **Per-activity-type sensors**, source-prefixed, e.g.
-  `sensor.garmin_running_distance_km`, `sensor.strava_cycling_duration_minutes`,
+  `sensor.garmin_running_distance_km`, `sensor.coros_running_distance_km`,
+  `sensor.strava_cycling_duration_minutes`,
   `sensor.apple_health_running_distance_km`: a lifetime-cumulative running
   total (like an odometer, not "today's total") for distance/duration/calories
   per activity type. Charting day/week/month/year totals from this is what
   the examples below show — the cumulative value itself isn't meant to be
   read directly.
 - **Last activity**: name, type, duration of your most recent workout.
-- **History import status** (`..._history_import_status`, Garmin/Strava
+- **History import status** (`..._history_import_status`, Garmin/Coros/Strava
   only): shows backfill progress (`idle` / `running` / `backing_off` /
   `complete` / `error`) and how far back it's reached — useful to watch
   during a large first-time import. See
@@ -207,9 +279,9 @@ compare them side by side.
 
 ## History backfill
 
-Applies to Garmin and Strava only. Apple Health's existing history arrives a
-different way — via the Shortcut's first run, which returns your full
-on-device workout history in one batch (see
+Applies to Garmin, Coros, and Strava only. Apple Health's existing history
+arrives a different way — via the Shortcut's first run, which returns your
+full on-device workout history in one batch (see
 [Apple Health setup](#apple-health-setup)) — rather than this paced,
 gap-aware background job.
 
@@ -221,6 +293,11 @@ the charts above useful immediately instead of starting from an empty graph.
 - Depth options range from 90 days to "all available history." Longer
   ranges mean more API requests to your source, paced conservatively (see
   below), so a multi-year backfill can take several minutes.
+- For "all available history," the backfill stops automatically once it
+  finds several consecutive empty chunks — it doesn't walk all the way back
+  to the 1970s for an account with only a few months of real data. The
+  earliest day it actually found is shown on the `..._history_start_date`
+  sensor.
 - Progress is visible on the `..._history_import_status` sensor.
 - It's gap-aware and self-healing: if Home Assistant restarts mid-backfill,
   the next run detects any incomplete range and re-fetches it rather than
@@ -230,14 +307,14 @@ the charts above useful immediately instead of starting from an empty graph.
 
 ## Rate limits / why things might be slow
 
-Garmin's API is unofficial and undocumented, so this integration paces
-backfill requests conservatively (20s between request batches, plus a
-cooldown after login) to avoid triggering Garmin's rate limiting — which,
-if hit, can lock out _all_ API access for that account for an extended
-period, not just the backfill. Strava's documented limits are more generous
-so its pacing is lighter. If you see the history import sensor show
-`backing_off`, this is expected behavior after a rate limit, not an error —
-it will retry automatically.
+Garmin's and Coros's APIs are both unofficial and undocumented, so this
+integration paces backfill requests conservatively (20s between request
+batches for both, plus a cooldown after Garmin login) to avoid triggering
+rate limiting — which, if hit, can lock out _all_ API access for that
+account for an extended period, not just the backfill. Strava's documented
+limits are more generous so its pacing is lighter. If you see the history
+import sensor show `backing_off`, this is expected behavior after a rate
+limit, not an error — it will retry automatically.
 
 ## Troubleshooting
 
@@ -255,13 +332,28 @@ restarting Home Assistant repeatedly while this is happening, as each
 restart re-triggers a fresh sign-in and can extend the lockout. It
 typically clears within 30–60 minutes of being left alone.
 
+**Coros: "Coros session expired or was invalidated" repeatedly** — most
+often means you (or another device/app) logged into the Coros app or
+Training Hub website, which silently ends this integration's session —
+Coros only allows one active login at a time (see
+[Coros setup](#coros-setup)). The integration will automatically log back in
+on its next poll; this doesn't affect the separate optional MCP connection
+for health/fitness data, if you have one connected.
+
+**Coros: setup fails no matter which region I pick** — double check you're
+actually entering your Coros account's email/password correctly first (a
+wrong password can also manifest as a region-shaped failure). If you're
+confident the credentials are right, try all three region options in turn —
+this integration cannot detect your account's real region automatically
+(see [Coros setup](#coros-setup)).
+
 **A Statistics Graph card shows a big spike or drop on one day** — this
 generally means the underlying statistics history has a gap or was
-imported before a fix to this integration. For Garmin/Strava, increasing
-then re-saving the backfill depth in **Configure** triggers a fresh,
-self-healing import (see [History backfill](#history-backfill)). For Apple
-Health, which doesn't have a backfill setting to re-trigger, re-run the
-Shortcut to resend the affected workouts instead.
+imported before a fix to this integration. For Garmin/Coros/Strava,
+increasing then re-saving the backfill depth in **Configure** triggers a
+fresh, self-healing import (see [History backfill](#history-backfill)). For
+Apple Health, which doesn't have a backfill setting to re-trigger, re-run
+the Shortcut to resend the affected workouts instead.
 
 **Apple Health: the Shortcut runs but no data shows up** — first confirm the
 webhook URL is actually reachable from your phone: open it directly in
@@ -300,9 +392,26 @@ ruff check custom_components/ha_workouts
 
 ### Architecture
 
-- `models.py` — source-agnostic data model (`Activity`, `DailySummary`, `BodyComposition`)
+- `models.py` — source-agnostic data model (`Activity`, `DailySummary`,
+  `FitnessAssessment`, `BodyComposition`)
 - `sources/base.py` — `WorkoutSource` interface each provider implements
 - `sources/garmin.py` — Garmin Connect implementation (unofficial API)
+- `sources/coros.py` — Coros implementation, against the same unofficial
+  Training Hub API `training.coros.com` itself uses (activities, splits,
+  and a rough HRV figure); optionally augmented by `sources/coros_mcp.py`
+- `sources/coros_mcp.py` — client for Coros's official OAuth2 + MCP program
+  ("COROS MCP"): Dynamic Client Registration, a fully server-to-server
+  login flow (no browser/external step despite being real OAuth2 — see
+  that module's docstring), token refresh, and JSON-RPC tool calls. Used
+  only for the handful of health/fitness metrics Training Hub doesn't
+  expose at all (steps, sleep, HRV assessment, recovery, fitness
+  assessment, training load) — an entirely separate, optional login from
+  `sources/coros.py`'s, with no session conflict between the two
+- `sources/coros_mcp_parsers.py` — parses Coros MCP's free-form prose tool
+  responses (not JSON — see `coros_mcp.py`'s docstring for why) into
+  `DailySummary`/`FitnessAssessment` fields; each parser returns `None` for
+  anything it can't find rather than raising, so an unrecognized wording
+  degrades a sensor to "unknown" instead of crashing the daily poll
 - `sources/strava.py` — Strava implementation (OAuth2 via Application Credentials)
 - `sources/apple_health.py` — Apple Health implementation; a push receiver
   rather than a poller, parses webhook payloads from an iOS Shortcut into
@@ -312,16 +421,19 @@ ruff check custom_components/ha_workouts
   (or, for Apple Health, drains whatever's arrived via webhook since the
   last poll)
 - `statistics_import.py` — gap-aware historical backfill into HA's long-term
-  statistics tables for Garmin/Strava, plus `async_apply_activity_deltas`,
+  statistics tables for Garmin/Coros/Strava, plus `async_apply_activity_deltas`,
   which folds newly-seen activities into the same statistics tables keyed by
   each activity's own real date — used for every live update, and the only
   path Apple Health ever writes through, since it has no separate backfill
-- `config_flow.py` — source picker, Garmin form, Strava OAuth2 flow, Apple
-  Health webhook generation, backfill depth selection for Garmin/Strava
-  (initial + reconfigurable via Options)
+- `config_flow.py` — source picker, Garmin form, Coros form (plus its
+  optional MCP-connect sub-step), Strava OAuth2 flow, Apple Health webhook
+  generation, backfill depth selection for Garmin/Coros/Strava (initial +
+  reconfigurable via Options, which is also where Coros MCP can be
+  connected after the fact if skipped during setup)
 - `__init__.py` — registers the Apple Health webhook endpoint and its
   request handler, alongside general entry setup/teardown
-- `sensor.py` — daily summary, per-activity-type, and backfill status entities
+- `sensor.py` — daily summary, per-activity-type, HRV, Coros MCP, and
+  backfill status entities
 
 Adding a new source means implementing `WorkoutSource` in `sources/` and
 wiring it into `config_flow.py` and `__init__.py`'s `_build_source`.

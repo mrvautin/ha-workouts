@@ -92,6 +92,49 @@ class DailySummary:
     #: "POOR" — kept as the source's raw string, same reasoning as hrv_status.
     training_readiness_level: str | None = None
     training_readiness_feedback: str | None = None
+    #: 0-100, from Coros's own MCP querySleepData tool — a genuine numeric
+    #: score, unlike hrv_status above which has no Coros equivalent.
+    sleep_score: int | None = None
+    #: Coros's own qualitative bucket, e.g. "Heavy training allowed" — kept
+    #: as the source's raw string, same reasoning as hrv_status/
+    #: training_readiness_level above.
+    recovery_level: str | None = None
+    recovery_percent: int | None = None
+    recovery_estimated_full_hours: float | None = None
+    #: Coros's own MCP queryTrainingLoadAssessment tool — short-term
+    #: (roughly 7-day) and long-term (roughly 28-day) training load, and
+    #: their ratio (ACWR-style; >1 means recent load is rising relative to
+    #: the longer baseline). No Garmin equivalent field exists to share
+    #: this with; Garmin's closest concept (acuteLoad) already only ever
+    #: surfaces inside training_readiness_* above, not as its own number.
+    training_load_short_term: float | None = None
+    training_load_long_term: float | None = None
+
+
+@dataclass(slots=True)
+class FitnessAssessment:
+    """A point-in-time fitness/race-readiness snapshot, normalized across
+    sources — currently only produced by Coros's MCP
+    queryFitnessAssessmentOverview tool (see sources/coros_mcp.py).
+
+    Deliberately separate from DailySummary: unlike steps/HRV/sleep, which
+    are genuinely per-day figures, these are Coros's current best estimate
+    given ALL of a user's training history — there's no meaningful "today's
+    VO2max" the way there's a "today's step count". Fields are individually
+    optional since Coros's own tool only returns whichever of these it has
+    enough data to compute (confirmed: an account with little training
+    history got only threshold_pace_seconds_per_km, with vo2_max and every
+    race prediction absent).
+    """
+
+    source: str
+    vo2_max: float | None = None
+    running_performance: float | None = None
+    threshold_pace_seconds_per_km: float | None = None
+    race_prediction_5k_seconds: float | None = None
+    race_prediction_10k_seconds: float | None = None
+    race_prediction_half_marathon_seconds: float | None = None
+    race_prediction_marathon_seconds: float | None = None
 
 
 @dataclass(slots=True)
@@ -113,3 +156,4 @@ class WorkoutData:
     activities: list[Activity] = field(default_factory=list)
     daily_summary: DailySummary | None = None
     body_composition: BodyComposition | None = None
+    fitness_assessment: FitnessAssessment | None = None

@@ -35,6 +35,16 @@ DEFAULT_COROS_REGION = "us"
 
 CONF_WEBHOOK_ID = "webhook_id"
 
+#: Coros MCP (see sources/coros_mcp.py) is an OPTIONAL second connection on
+#: top of the Coros entry's existing Training Hub login above — entirely
+#: separate credentials/session, only ever present in a config entry's data
+#: if the user chose to connect it during setup or via Reconfigure. Absence
+#: of CONF_COROS_MCP_ACCESS_TOKEN means "not connected", not an error.
+CONF_COROS_MCP_CLIENT_ID = "coros_mcp_client_id"
+CONF_COROS_MCP_ACCESS_TOKEN = "coros_mcp_access_token"
+CONF_COROS_MCP_REFRESH_TOKEN = "coros_mcp_refresh_token"
+CONF_COROS_MCP_EXPIRES_AT = "coros_mcp_expires_at"
+
 #: Strava OAuth scopes needed to read activity list, activity detail (calories),
 #: and athlete stats.
 STRAVA_OAUTH_SCOPES = "activity:read_all,read"
