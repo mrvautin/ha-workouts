@@ -455,6 +455,27 @@ def _current_week_start_label(options: dict[str, Any]) -> str:
     )
 
 
+def _source_specific_backfill_note(source_type: str | None) -> str:
+    """The "{source_specific_note}" slot in the options flow's "init" step
+    description (strings.json) — this dialog is shared by every source that
+    has a backfill depth (Garmin/Coros/Strava), but the splits-backfill
+    explanation only applies to Garmin, so it must not appear for the
+    others (a real, user-reported bug: this text used to be a single fixed
+    string mentioning Garmin regardless of which source's Configure dialog
+    was actually open). Empty string renders as nothing, not a stray blank
+    paragraph, since the surrounding "\n\n" already supplies the spacing.
+    """
+    if source_type == SOURCE_GARMIN:
+        return (
+            "For Garmin, this depth also controls how far back per-km pace/split "
+            "data is backfilled. Garmin has no bulk endpoint for splits, so it "
+            "fetches them one activity at a time in the background — a large "
+            "depth can take a while to fully catch up, but new activities "
+            "always get splits right away regardless.\n\n"
+        )
+    return ""
+
+
 class HaWorkoutsOptionsFlow(OptionsFlow):
     """Configure options after setup.
 
@@ -533,7 +554,15 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
             and self.config_entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN) is None
         ):
             schema_fields[vol.Optional(_CONNECT_MCP_FIELD, default=False)] = bool
-        return self.async_show_form(step_id="init", data_schema=vol.Schema(schema_fields))
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(schema_fields),
+            description_placeholders={
+                "source_specific_note": _source_specific_backfill_note(
+                    self.config_entry.data.get(CONF_SOURCE_TYPE)
+                )
+            },
+        )
 
     async def async_step_connect_coros_mcp(
         self, user_input: dict[str, Any] | None = None
