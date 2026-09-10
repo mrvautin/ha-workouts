@@ -17,7 +17,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.entity import DeviceInfo
+from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
@@ -256,10 +256,14 @@ COROS_MCP_SENSORS: tuple[WorkoutSensorDescription, ...] = (
     WorkoutSensorDescription(
         key="fitness_threshold_pace",
         translation_key="fitness_threshold_pace",
-        native_unit_of_measurement="s/km",
-        state_class=SensorStateClass.MEASUREMENT,
+        # A "M:SS /km" string, not a number+unit: seconds-per-km is
+        # technically what Coros returns, but nobody reads pace that way —
+        # every runner expects e.g. "4:45 /km", not "285 s/km" (a real,
+        # user-reported confusion). No state_class/native_unit_of_measurement
+        # for the same reason hrv_status/recovery_level above have none —
+        # this is a formatted string, not a plain numeric measurement.
         value_fn=lambda data: (
-            data.fitness_assessment.threshold_pace_seconds_per_km
+            _format_pace(data.fitness_assessment.threshold_pace_seconds_per_km)
             if data.fitness_assessment
             else None
         ),
@@ -309,6 +313,19 @@ SOURCES_WITH_DAILY_SUMMARY = {SOURCE_GARMIN}
 #: narrower set than SOURCES_WITH_DAILY_SUMMARY above, since Coros only ever
 #: populates those three fields, never the rest (steps, body battery, etc.).
 SOURCES_WITH_HRV = {SOURCE_GARMIN, SOURCE_COROS}
+
+
+def _format_pace(seconds_per_km: float | None) -> str | None:
+    """Format a seconds-per-km figure as "M:SS /km" — the way every runner
+    actually reads pace, not the raw number a source's API returns it as
+    (a real, user-reported confusion: Coros's threshold pace sensor showing
+    "285.0 s/km" instead of "4:45 /km").
+    """
+    if seconds_per_km is None:
+        return None
+    total_seconds = round(seconds_per_km)
+    minutes, seconds = divmod(total_seconds, 60)
+    return f"{minutes}:{seconds:02d} /km"
 
 
 def _activity_duration_minutes(activity: Activity) -> float:
@@ -422,12 +439,17 @@ async def async_setup_entry(
     # Per-entry, not per-source-type: whether THIS Coros entry has MCP
     # connected (see config_flow.py's async_step_coros_mcp) — a user can
     # have a Coros entry with or without it.
-    if source_type == SOURCE_COROS and entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN) is not None:
+    has_coros_mcp = (
+        source_type == SOURCE_COROS and entry.data.get(CONF_COROS_MCP_ACCESS_TOKEN) is not None
+    )
+    if has_coros_mcp:
         summary_descriptions = list(COROS_MCP_SENSORS) + summary_descriptions
 
     entities: list[SensorEntity] = [
         WorkoutSensor(coordinator, entry, description) for description in summary_descriptions
     ]
+    if has_coros_mcp:
+        entities.append(CorosMcpDebugLogSensor(coordinator, entry))
     entities.append(
         BackfillStatusSensor(
             coordinator,
@@ -954,3 +976,50 @@ class LastUpdatedSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorE
     @property
     def native_value(self) -> object | None:
         return self.coordinator.last_data_update
+
+
+class CorosMcpDebugLogSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
+    """Exposes the raw text of recent Coros MCP tool calls for troubleshooting.
+
+    Coros's MCP API returns free-form prose (see sources/coros_mcp.py's
+    module docstring), parsed by best-effort regex against wording captured
+    from one real account. Anyone whose account phrases a response
+    differently (different watch model, region, language, or just a Coros
+    wording change) will silently get missing fields with no error — this
+    integration's own dev/test account has no watch at all, so there's no
+    way to notice or fix that locally. Disabled by default (entity_category
+    diagnostic, not meant for normal dashboards): a user willing to help
+    troubleshoot enables it, lets it run a poll cycle or two, then copies the
+    raw_log attribute back for review. See sources/coros.py's
+    CorosSource.mcp_debug_log for what populates it.
+    """
+
+    _attr_has_entity_name = True
+    _attr_translation_key = "coros_mcp_debug_log"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_entity_registry_enabled_default = False
+
+    def __init__(self, coordinator: WorkoutDataUpdateCoordinator, entry: ConfigEntry) -> None:
+        super().__init__(coordinator)
+        self._attr_unique_id = f"{entry.entry_id}_coros_mcp_debug_log"
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=coordinator.source.key.capitalize(),
+        )
+
+    @property
+    def native_value(self) -> str | None:
+        log = getattr(self.coordinator.source, "mcp_debug_log", None)
+        if not log:
+            return None
+        last = log[-1]
+        # Sensor states are capped at 255 chars by HA — the state is just a
+        # "what/when" pointer; the full text of every recent call lives in
+        # the raw_log attribute below instead.
+        return f"{last['tool']} @ {last['time']}"
+
+    @property
+    def extra_state_attributes(self) -> dict[str, object]:
+        log = getattr(self.coordinator.source, "mcp_debug_log", None)
+        return {"raw_log": list(log) if log else []}

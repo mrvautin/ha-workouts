@@ -40,6 +40,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
+from collections import deque
 from collections.abc import Callable
 from datetime import date, datetime, timezone
 from typing import Any
@@ -66,6 +67,12 @@ from .base import (
 from .coros_mcp import CorosMcpClient, McpTokenSet
 
 _LOGGER = logging.getLogger(__name__)
+
+#: How many recent MCP tool calls to keep raw text for (see
+#: CorosSource.mcp_debug_log) — bounded so a long-running install doesn't
+#: grow this without limit; only the most recent handful are ever useful for
+#: troubleshooting a live wording/format change.
+_MCP_DEBUG_LOG_MAXLEN = 20
 
 #: Login succeeds against any region's host, but the returned token is only
 #: accepted by that SAME region's host for every later call — see module
@@ -167,6 +174,14 @@ class CorosSource(WorkoutSource):
         self._mcp_tokens = mcp_tokens
         self._mcp_token_update_callback = mcp_token_update_callback
         self._mcp_lock = asyncio.Lock()
+        # Raw text of the most recent MCP tool calls (both successful and
+        # failed), newest last — surfaced via the coros_mcp_debug_log
+        # diagnostic sensor so a user with a real watch (which this
+        # integration's own dev/test account doesn't have) can report back
+        # exactly what Coros's MCP API returns for them, without needing
+        # screen-share access to their account. See sensor.py's
+        # CorosMcpDebugLogSensor.
+        self.mcp_debug_log: deque[dict[str, Any]] = deque(maxlen=_MCP_DEBUG_LOG_MAXLEN)
 
     def _client(self) -> aiohttp.ClientSession:
         # HA's shared session (one per hass instance, closed by HA itself on
@@ -392,15 +407,30 @@ class CorosSource(WorkoutSource):
             tokens = self._mcp_tokens
 
         try:
-            return await self._mcp_client.async_call_tool(tokens, tool_name, arguments)
-        except WorkoutSourceError:
+            text = await self._mcp_client.async_call_tool(tokens, tool_name, arguments)
+        except WorkoutSourceError as err:
             _LOGGER.warning(
                 "Coros MCP call to %s failed for %s; skipping this data this poll",
                 tool_name,
                 self.key,
                 exc_info=True,
             )
+            self.mcp_debug_log.append(
+                {
+                    "time": datetime.now(tz=timezone.utc).isoformat(),
+                    "tool": tool_name,
+                    "error": str(err),
+                }
+            )
             return None
+        self.mcp_debug_log.append(
+            {
+                "time": datetime.now(tz=timezone.utc).isoformat(),
+                "tool": tool_name,
+                "text": text,
+            }
+        )
+        return text
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date

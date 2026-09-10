@@ -155,6 +155,9 @@
       "fitness_threshold_pace": {
         "name": "Threshold pace"
       },
+      "coros_mcp_debug_log": {
+        "name": "MCP debug log"
+      },
       "last_activity_name": {
         "name": "Last activity"
       },
