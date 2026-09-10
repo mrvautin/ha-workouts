@@ -987,17 +987,19 @@ class CorosMcpDebugLogSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Se
     differently (different watch model, region, language, or just a Coros
     wording change) will silently get missing fields with no error — this
     integration's own dev/test account has no watch at all, so there's no
-    way to notice or fix that locally. Disabled by default (entity_category
-    diagnostic, not meant for normal dashboards): a user willing to help
-    troubleshoot enables it, lets it run a poll cycle or two, then copies the
-    raw_log attribute back for review. See sources/coros.py's
-    CorosSource.mcp_debug_log for what populates it.
+    way to notice or fix that locally. Enabled by default (still
+    entity_category diagnostic, so it stays out of normal dashboards) while
+    the MCP parsers are still being validated against real accounts with
+    real watches — zero setup needed for someone willing to help
+    troubleshoot to have raw_log content ready. Meant to be temporary: once
+    the parsers are confirmed reliable across enough real accounts, this
+    sensor can be removed entirely rather than kept forever. See
+    sources/coros.py's CorosSource.mcp_debug_log for what populates it.
     """
 
     _attr_has_entity_name = True
     _attr_translation_key = "coros_mcp_debug_log"
     _attr_entity_category = EntityCategory.DIAGNOSTIC
-    _attr_entity_registry_enabled_default = False
 
     def __init__(self, coordinator: WorkoutDataUpdateCoordinator, entry: ConfigEntry) -> None:
         super().__init__(coordinator)
