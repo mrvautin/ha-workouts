@@ -16,6 +16,7 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers import entity_registry as er
 
 from .const import (
     CONF_COROS_MCP_ACCESS_TOKEN,
@@ -39,6 +40,7 @@ from .sources.coros import CorosSource
 from .sources.coros_mcp import McpTokenSet
 from .sources.garmin import GarminSource
 from .sources.strava import StravaSource
+from .statistics_import import async_wipe_source_data
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -160,7 +162,56 @@ async def _async_update_listener(hass: HomeAssistant, entry: ConfigEntry) -> Non
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
+    # Captured BEFORE unloading platforms (which is what actually purges
+    # these from the entity registry) — async_remove_entry below needs them
+    # to clear each sensor's auto-compiled statistics on a real delete, but
+    # by the time that hook runs the registry has already forgotten this
+    # entry's entities entirely (confirmed empirically: querying the
+    # registry from inside async_remove_entry finds nothing). Stashed on
+    # hass.data under a dedicated key, separate from the coordinator map,
+    # so it survives past the pop() below.
+    entity_ids = [
+        entity.entity_id
+        for entity in er.async_entries_for_config_entry(
+            er.async_get(hass), entry.entry_id
+        )
+    ]
+    hass.data.setdefault(f"{DOMAIN}_entity_ids", {})[entry.entry_id] = entity_ids
+
     unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
     if unloaded:
         hass.data[DOMAIN].pop(entry.entry_id)
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Wipe this source's imported data once its LAST config entry is deleted.
+
+    entry_slug (see statistics_import.py/sensor.py) is a static per-source-
+    type string — e.g. every Coros entry, regardless of account, shares the
+    same "coros" slug — not tied to any one config entry's id. So the
+    activity log, statistics, and backfill-progress caches all already
+    outlive a single entry's delete+re-add today, for every source, not just
+    Coros: without this, "remove and re-add to start fresh" silently doesn't,
+    since a plain re-add finds the old data still there and treats it as
+    already imported (see async_wipe_source_data's docstring for the exact
+    Coros bug that surfaced this).
+
+    Only wipes when no OTHER entry of the same source type remains — those
+    entries currently share this same data (a separate, pre-existing
+    limitation: multiple accounts of one source type all collide on the same
+    slug), so removing one while a sibling is still configured must not
+    delete data the sibling is still using.
+    """
+    entity_ids = hass.data.get(f"{DOMAIN}_entity_ids", {}).pop(entry.entry_id, [])
+    source_type = entry.data.get(CONF_SOURCE_TYPE)
+    if source_type is None:
+        return
+    remaining = [
+        e
+        for e in hass.config_entries.async_entries(DOMAIN)
+        if e.entry_id != entry.entry_id and e.data.get(CONF_SOURCE_TYPE) == source_type
+    ]
+    if remaining:
+        return
+    await async_wipe_source_data(hass, source_type, entity_ids)

@@ -93,7 +93,11 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
-from .activity_log import async_get_activities_in_range, async_record_activities
+from .activity_log import (
+    async_get_activities_in_range,
+    async_record_activities,
+    async_wipe_activity_log,
+)
 from .backfill_progress import BackfillProgress
 from .const import DOMAIN
 from .models import Activity, ActivityType
@@ -236,6 +240,65 @@ async def async_set_earliest_known_activity_day(
     hass: HomeAssistant, entry_slug: str, day: date
 ) -> None:
     await _earliest_known_activity_day_store(hass, entry_slug).async_save(day.isoformat())
+
+
+async def async_wipe_source_data(
+    hass: HomeAssistant, entry_slug: str, entity_ids: list[str] = []  # noqa: B006
+) -> None:
+    """Permanently delete every piece of this source's imported data:
+    the activity log, the earliest-known-day cache, the per-statistic
+    dedup ledgers, and the recorder's own compiled statistics — both this
+    integration's own external ha_workouts:* series AND the plain
+    entity-attached (sensor.*) statistics HA auto-compiles for any of our
+    sensors that carry a state_class (steps, HRV, recovery, training load,
+    etc.) — entity_ids should be every entity_id this config entry ever had,
+    captured BEFORE unloading (see __init__.py's async_unload_entry) since
+    the entity registry has already forgotten them by the time this runs;
+    omitting them just leaves those orphaned statistics behind with a
+    "no state available" repair notice instead of failing anything.
+
+    entry_slug is a static per-source-type string (e.g. "coros"), NOT tied to
+    any one config entry's id (see sensor.py's async_setup_entry) — so this
+    data would otherwise silently survive a delete+re-add of the integration
+    forever, which is exactly what happened when a real Coros day-bucketing
+    bug (activities parsed in UTC instead of local time) got fixed in code
+    but left already-imported activities/statistics stuck under their old,
+    wrong dates: _range_fully_covered below considers a day "done" once ANY
+    statistics row exists for it, so a plain re-add silently kept the stale,
+    wrong data forever instead of re-importing it correctly. Called from
+    __init__.py's async_remove_entry, but ONLY when the entry being removed
+    is the last one for its source type — see that function for why.
+    """
+    statistic_ids = [
+        statistic_id_slug(entry_slug, activity_type, metric)
+        for activity_type in ActivityType
+        for metric in _metrics_for(activity_type)
+    ] + list(entity_ids)
+
+    # NOT get_instance(hass).async_add_executor_job(lambda: clear_statistics(...)):
+    # the recorder's statistics tables may only be touched from the recorder's
+    # own dedicated worker thread, not an arbitrary executor thread — calling
+    # the low-level clear_statistics directly like that raises "Detected
+    # unsafe call not in recorder thread" (confirmed by hitting exactly this
+    # in testing). Recorder.async_clear_statistics is the correct entry
+    # point: a plain @callback (safe from the event loop) that queues the
+    # actual deletion onto the recorder thread — on_done lets us await it
+    # actually finishing rather than firing-and-forgetting.
+    #
+    # on_done is invoked directly from the recorder's worker thread (see
+    # ClearStatisticsTask.run), NOT the event loop — asyncio.Event.set isn't
+    # thread-safe to call from there, hence call_soon_threadsafe rather than
+    # passing done.set directly.
+    loop = asyncio.get_running_loop()
+    done = asyncio.Event()
+    get_instance(hass).async_clear_statistics(
+        statistic_ids, on_done=lambda: loop.call_soon_threadsafe(done.set)
+    )
+    await done.wait()
+    for statistic_id in statistic_ids:
+        await _applied_source_ids_store(hass, statistic_id).async_remove()
+    await _earliest_known_activity_day_store(hass, entry_slug).async_remove()
+    await async_wipe_activity_log(hass, entry_slug)
 
 
 async def async_backfill_activity_statistics(

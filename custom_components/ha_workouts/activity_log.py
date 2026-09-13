@@ -88,6 +88,19 @@ async def async_save_activities(
     await _store(hass, entry_slug).async_save([_activity_to_dict(a) for a in activities.values()])
 
 
+async def async_wipe_activity_log(hass: HomeAssistant, entry_slug: str) -> None:
+    """Permanently delete the persisted activity log for entry_slug.
+
+    Used when the last config entry for a source type is removed (see
+    __init__.py's async_remove_entry / statistics_import.async_wipe_source_data)
+    so a later re-add starts genuinely fresh instead of silently reusing old
+    data — entry_slug is a static per-source-type string (e.g. "coros"), not
+    tied to any one config entry's id, so this data would otherwise survive
+    delete+re-add indefinitely.
+    """
+    await _store(hass, entry_slug).async_remove()
+
+
 async def async_record_activities(
     hass: HomeAssistant, entry_slug: str, new_activities: list[Activity]
 ) -> None:
