@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import logging
 from collections import deque
 from collections.abc import Callable
@@ -117,6 +118,23 @@ def _map_activity_type(sport_type: int | None) -> ActivityType:
     if sport_type is None:
         return ActivityType.OTHER
     return _ACTIVITY_TYPE_MAP.get(sport_type, ActivityType.OTHER)
+
+
+def _decode_json(raw: str, path: str) -> dict[str, Any]:
+    """Decode a Coros response body ourselves rather than via aiohttp's
+    resp.json(), which raises ContentTypeError (a ClientError) whenever the
+    Content-Type header isn't a JSON type — even for a 200 response whose
+    body is perfectly valid JSON. Observed for real on /activity/detail/query
+    for a specific activity on one real account (status 200, JSON body, non-
+    JSON Content-Type) that this integration's own accounts never hit,
+    apparently a Coros server-side quirk tied to sport type or region.
+    """
+    try:
+        return json.loads(raw) if raw else {}
+    except ValueError as err:
+        raise WorkoutSourceError(
+            f"Coros returned a non-JSON response for {path}: {raw[:200]!r}"
+        ) from err
 
 
 def _md5(value: str) -> str:
@@ -208,9 +226,10 @@ class CorosSource(WorkoutSource):
                     if resp.status == 429:
                         raise WorkoutSourceRateLimitedError("Coros rate limited the login")
                     resp.raise_for_status()
-                    body = await resp.json()
+                    raw = await resp.text()
             except aiohttp.ClientError as err:
                 raise WorkoutSourceError(f"Could not connect to Coros: {err}") from err
+            body = _decode_json(raw, "/account/login")
 
             if body.get("result") != "0000":
                 raise WorkoutSourceAuthError(
@@ -263,9 +282,19 @@ class CorosSource(WorkoutSource):
                 if resp.status == 429:
                     raise WorkoutSourceRateLimitedError("Coros rate limited us")
                 resp.raise_for_status()
-                body = await resp.json()
+                # Not resp.json(): aiohttp's default decoder raises
+                # ContentTypeError if the response's Content-Type header
+                # isn't a JSON type, even when the body itself is valid
+                # JSON — observed for real against a live account on
+                # /activity/detail/query (status 200, JSON body, but a
+                # non-JSON Content-Type), seemingly for a specific
+                # activity/sport-type combo Coros's server mishandles. Read
+                # the raw text and decode it ourselves so a wrong header
+                # doesn't fail an otherwise-good response.
+                raw = await resp.text()
         except aiohttp.ClientError as err:
             raise WorkoutSourceError(f"Error communicating with Coros: {err}") from err
+        body = _decode_json(raw, path)
 
         # "1019" (and other non-"0000" auth-shaped codes) means the token has
         # expired or been invalidated — most commonly because the user (or
@@ -285,9 +314,22 @@ class CorosSource(WorkoutSource):
     async def async_fetch(self, target_day: date) -> WorkoutData:
         activities = await self.async_fetch_activities_range(target_day, target_day)
         for activity in activities:
-            activity.splits = await self.async_fetch_splits(
-                activity.source_id, _activity_sport_type(activity)
-            )
+            try:
+                activity.splits = await self.async_fetch_splits(
+                    activity.source_id, _activity_sport_type(activity)
+                )
+            except WorkoutSourceError:
+                # Splits are supplementary per-activity detail — a single
+                # activity's detail call failing (e.g. the non-JSON-response
+                # quirk _decode_json's docstring describes, seen for real on
+                # one specific activity on one real account) must not take
+                # down the whole live poll and every other sensor with it.
+                # Leaves activity.splits at its default (empty) instead.
+                _LOGGER.warning(
+                    "Coros splits fetch failed for activity %s; continuing without splits",
+                    activity.source_id,
+                    exc_info=True,
+                )
         # Both summary sources below have no date parameter — they always
         # answer for "now", unlike the activity list above — so this whole
         # block only ever runs for today's live poll, never the historical
