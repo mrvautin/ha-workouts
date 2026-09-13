@@ -49,6 +49,7 @@ from typing import Any
 import aiohttp
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
+from homeassistant.util import dt as dt_util
 
 from ..models import (
     Activity,
@@ -567,10 +568,22 @@ def _activity_sport_type(activity: Activity) -> int:
 
 
 def _parse_coros_timestamp(value: int | None) -> datetime:
-    """Coros's startTime is Unix seconds, UTC."""
+    """Coros's startTime is Unix seconds, UTC — converted here to HA's
+    configured local timezone (dt_util.as_local), NOT left as UTC.
+
+    Every place downstream that buckets an activity by day (sensor.py,
+    statistics_import.py, activity_log.py) just calls .date() on this value,
+    the same convention GarminSource's _parse_garmin_datetime relies on
+    (Garmin's API already returns local-time strings, so .date() there is
+    already correct). Coros's timestamp is a real Unix instant, not a wall-
+    clock string, so leaving it as UTC before taking .date() silently shifts
+    any activity near local midnight onto the wrong calendar day for anyone
+    not in UTC — a real, user-reported bug (a 24km run done "today" showing
+    up under yesterday's date).
+    """
     if not value:
         return datetime.min.replace(tzinfo=timezone.utc)
-    return datetime.fromtimestamp(value, tz=timezone.utc)
+    return dt_util.as_local(datetime.fromtimestamp(value, tz=timezone.utc))
 
 
 def _parse_dashboard_hrv(
