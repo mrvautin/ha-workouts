@@ -78,7 +78,6 @@ class DailySummary:
     body_battery_min: int | None = None
     active_calories: float | None = None
     floors_climbed: int | None = None
-    vo2_max: float | None = None
     #: Last night's average HRV reading, in milliseconds (RMSSD) — Garmin's
     #: own "last night" figure, not a same-day-so-far average.
     hrv_last_night_avg: float | None = None

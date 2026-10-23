@@ -109,9 +109,6 @@
       "body_battery_max": {
         "name": "Body battery (max)"
       },
-      "vo2_max": {
-        "name": "VO2 max"
-      },
       "hrv_last_night_avg": {
         "name": "HRV (last night)"
       },

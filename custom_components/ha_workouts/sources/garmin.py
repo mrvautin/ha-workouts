@@ -29,16 +29,25 @@ calls against a real account:
 - Daily summary, HRV (with status classification), sleep (with stage
   breakdown), body battery, fitness age, heart rate zones: all present,
   often richer than the old garminconnect library exposed.
-- VO2max: present, but as a per-activity field (SummarizedActivityDTO.
-  vO2MaxValue) on the activities list, not a separate daily endpoint.
 - Per-km/mile splits: present, but on GET /activity-service/activity/{id}
   (ActivitySummaryDTO.splitSummaries), NOT the .../workouts endpoint (which
   only returns a structured *planned* workout's steps/targets, never actual
   recorded performance).
-- Training Readiness (score/level/feedback): genuinely absent. No endpoint,
-  field, or schema anywhere in Garmin's own spec exposes it. This is the
-  one real feature loss versus the old unofficial library; DailySummary's
-  training_readiness_* fields are simply never populated by this source.
+- VO2max and Training Readiness (score/level/feedback): BOTH genuinely
+  absent, despite Garmin Connect's own app clearly showing current values
+  for both via its "Training Status" widget. The spec's one VO2max-shaped
+  field (SummarizedActivityDTO.vO2MaxValue, on the activities list) was
+  confirmed, by direct testing against a real account, to never actually
+  be populated — checked across 50 real activities and a full recursive
+  scan of the single-activity detail response, zero non-null values found
+  anywhere. Both metrics live in Garmin's internal metrics/training-status
+  service, which only the OLD unofficial garminconnect library's
+  session-cookie login could reach (get_max_metrics/get_training_readiness)
+  — confirmed the new Personal API's bearer token is flatly rejected by
+  those old endpoints (a plain HTML sign-in page comes back, not even a
+  401). These are the two real feature losses versus the old unofficial
+  library; DailySummary has no vo2_max or training_readiness_* fields at
+  all for this source.
 """
 from __future__ import annotations
 
@@ -101,19 +110,6 @@ def _parse_hrv(raw: dict[str, Any] | None) -> tuple[float | None, float | None, 
         summary.get("weeklyAvg"),
         summary.get("status"),
     )
-
-
-def _parse_vo2_max_from_activities(activities: list[dict[str, Any]]) -> float | None:
-    """VO2max is attached to individual activities (SummarizedActivityDTO.
-    vO2MaxValue), not a standalone daily endpoint — use the most recent
-    activity (of any type) that actually carries a value, newest first,
-    since that's Garmin's own latest estimate as of that activity.
-    """
-    for activity in activities:
-        value = activity.get("vO2MaxValue")
-        if value is not None:
-            return value
-    return None
 
 
 def _parse_splits(raw: dict[str, Any] | None) -> list[ActivitySplit]:
@@ -298,17 +294,9 @@ class GarminSource(WorkoutSource):
             {"startDate": day_str, "endDate": day_str},
         )
         raw_hrv = await self._request(f"/hrv-service/hrv/{day_str}")
-        # VO2max rides on activities, but not necessarily TODAY's — fetch a
-        # small recent window so a VO2max estimate from a few days ago still
-        # shows up rather than going blank on days with no new activity.
-        raw_recent_activities = await self._request(
-            "/activitylist-service/activities/search/activities", {"start": 0, "limit": 10}
-        )
 
         activities = [self._parse_activity(item) for item in raw_activities or []]
-        summary = self._parse_daily_summary(
-            raw_summary, target_day, raw_hrv, raw_recent_activities
-        )
+        summary = self._parse_daily_summary(raw_summary, target_day, raw_hrv)
 
         # Splits are one extra API call per activity — cheap here since a
         # single day's poll only ever returns a handful of new activities at
@@ -379,7 +367,6 @@ class GarminSource(WorkoutSource):
         raw_summary: dict[str, Any] | list[Any],
         target_day: date,
         raw_hrv: dict[str, Any] | list[Any],
-        raw_recent_activities: dict[str, Any] | list[Any],
     ) -> DailySummary:
         summary_days = raw_summary.get("data") if isinstance(raw_summary, dict) else None
         day_summary = (summary_days or [{}])[-1] if summary_days else {}
@@ -392,8 +379,6 @@ class GarminSource(WorkoutSource):
         hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_hrv(
             raw_hrv if isinstance(raw_hrv, dict) else None
         )
-        recent_activities = raw_recent_activities if isinstance(raw_recent_activities, list) else []
-        vo2_max = _parse_vo2_max_from_activities(recent_activities)
 
         return DailySummary(
             source=self.key,
@@ -405,14 +390,12 @@ class GarminSource(WorkoutSource):
             stress_avg=stress.get("avgLevel"),
             body_battery_max=body_battery.get("maxValue"),
             body_battery_min=body_battery.get("minValue"),
-            vo2_max=vo2_max,
             hrv_last_night_avg=hrv_last_night_avg,
             hrv_weekly_avg=hrv_weekly_avg,
             hrv_status=hrv_status,
-            # Training Readiness has no equivalent in Garmin's official
-            # Personal API — confirmed absent from its published OpenAPI
-            # spec (no endpoint, field, or schema anywhere). Left unset
-            # (None) rather than guessed at; see module docstring.
+            # VO2max and Training Readiness have no equivalent in Garmin's
+            # official Personal API — confirmed absent (see module
+            # docstring). Left unset (None) rather than guessed at.
         )
 
     @classmethod

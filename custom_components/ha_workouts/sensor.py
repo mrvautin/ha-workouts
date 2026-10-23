@@ -109,21 +109,20 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
             data.daily_summary.body_battery_max if data.daily_summary else None
         ),
     ),
-    WorkoutSensorDescription(
-        key="vo2_max",
-        translation_key="vo2_max",
-        native_unit_of_measurement="mL/kg/min",
-        state_class=SensorStateClass.MEASUREMENT,
-        suggested_display_precision=1,
-        value_fn=lambda data: data.daily_summary.vo2_max if data.daily_summary else None,
-    ),
-    # Training Readiness (score/level/feedback) is deliberately NOT a sensor
-    # here: Garmin's official Personal API (see sources/garmin.py's module
-    # docstring) has no equivalent endpoint at all — confirmed absent from
-    # Garmin's own published OpenAPI spec — unlike the unofficial
-    # garminconnect library this integration used previously, which did
-    # expose it. A genuine feature loss from the pivot to official auth, not
-    # a parsing gap; DailySummary no longer even has these fields.
+    # VO2 max and Training Readiness (score/level/feedback) are deliberately
+    # NOT sensors here: Garmin's official Personal API (see sources/garmin.py's
+    # module docstring) has no equivalent to either — confirmed absent from
+    # Garmin's own published OpenAPI spec, AND confirmed (by direct testing
+    # against a real account whose Garmin Connect app clearly shows a current
+    # VO2max) that the API's one VO2max-shaped field
+    # (SummarizedActivityDTO.vO2MaxValue) is never actually populated, across
+    # 50 real activities checked. Both come from Garmin's internal metrics/
+    # training-status service, which only the OLD unofficial garminconnect
+    # library's session-cookie login could reach — the new Personal API's
+    # bearer token is rejected by those endpoints entirely (plain sign-in
+    # page returned, not even a 401). A genuine feature loss from the pivot
+    # to official auth, not a parsing gap; DailySummary no longer even has
+    # these fields.
 )
 
 #: HRV sensors — split out from DAILY_SUMMARY_SENSORS since, unlike the rest

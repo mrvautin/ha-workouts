@@ -79,13 +79,15 @@ token. When it expires, every sensor will start reporting an authentication
 error. To fix it: generate a new key the same way above, remove this
 integration's Garmin entry, and re-add it with the new key.
 
-One real feature gap versus Garmin's old unofficial API: **Training
-Readiness** (score/level/feedback) has no equivalent in the official Personal
-API — it's simply not exposed anywhere in Garmin's published API, so those
-sensors don't exist for this source. Everything else (steps, HRV with status,
-sleep with stage detail, body battery, VO2max, activities, and per-km/mile
-splits) is available, and some of it is richer than the old unofficial API
-exposed.
+Two real feature gaps versus Garmin's old unofficial API: **VO2max** and
+**Training Readiness** (score/level/feedback) both have no equivalent in the
+official Personal API — confirmed by direct testing (checked 50 real
+activities, zero returned a VO2max value, despite Garmin Connect's own app
+clearly showing one) that this data lives in an internal Garmin service the
+Personal API simply doesn't expose, so those sensors don't exist for this
+source. Everything else (steps, HRV with status, sleep with stage detail,
+body battery, activities, and per-km/mile splits) is available, and some of
+it is richer than the old unofficial API exposed.
 
 Garmin doesn't publish a rate limit for the Personal API, so this integration
 paces its requests conservatively regardless (see [Rate
@@ -230,11 +232,10 @@ Setting up the data (make sure all fields are `Text`)
 
 - **Daily summary sensors** (Garmin only — Coros/Strava/Apple Health have no
   equivalent): steps, resting heart rate, active calories, floors climbed,
-  average stress, body battery, VO2 max, and HRV (last night average, 7-day
-  average, status). Training Readiness is **not** available — Garmin's
-  official Personal API has no equivalent to the old unofficial API's
-  training readiness score/level/feedback (see [Garmin
-  setup](#garmin-setup)).
+  average stress, body battery, and HRV (last night average, 7-day average,
+  status). VO2 max and Training Readiness are **not** available — Garmin's
+  official Personal API has no equivalent to either of the old unofficial
+  API's values (see [Garmin setup](#garmin-setup)).
 - **Coros health & fitness sensors** (only if you connected the optional
   second MCP connection — see [Coros setup](#coros-setup)): steps, active
   calories, sleep score/duration, HRV (last night/7-day average), recovery
