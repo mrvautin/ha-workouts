@@ -10,6 +10,7 @@ see statistics_import.py).
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 from typing import Any
 
@@ -40,6 +41,7 @@ from .const import (
     CONF_COROS_MCP_EXPIRES_AT,
     CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
+    CONF_GARMIN_API_KEY,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
     CONF_WEEK_START_DAY,
@@ -63,8 +65,7 @@ _LOGGER = logging.getLogger(__name__)
 
 STEP_GARMIN_SCHEMA = vol.Schema(
     {
-        vol.Required(CONF_EMAIL): str,
-        vol.Required(CONF_PASSWORD): str,
+        vol.Required(CONF_GARMIN_API_KEY): str,
     }
 )
 
@@ -139,6 +140,7 @@ class HaWorkoutsConfigFlow(
         super().__init__()
         self._email: str | None = None
         self._password: str | None = None
+        self._garmin_api_key: str | None = None
         self._coros_region: str | None = None
         self._coros_mcp_tokens: McpTokenSet | None = None
         self._pending_oauth_data: dict[str, Any] | None = None
@@ -172,7 +174,7 @@ class HaWorkoutsConfigFlow(
 
         return self.async_show_form(step_id="user", data_schema=_SOURCE_PICKER_SCHEMA)
 
-    # --- Garmin: plain email/password form ---------------------------------
+    # --- Garmin: Personal API key form --------------------------------------
 
     async def async_step_garmin(
         self, user_input: dict[str, Any] | None = None
@@ -180,13 +182,22 @@ class HaWorkoutsConfigFlow(
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            email = user_input[CONF_EMAIL]
-            password = user_input[CONF_PASSWORD]
+            api_key = user_input[CONF_GARMIN_API_KEY]
 
-            await self.async_set_unique_id(f"{SOURCE_GARMIN}_{email.lower()}")
+            # Unique per key, not per account email (which this flow never
+            # collects) — a short, non-reversible hash so the raw key itself
+            # never ends up stored as the entry's unique_id (visible in
+            # diagnostics/logs more readily than entry.data). Re-entering the
+            # SAME key (e.g. re-running setup by mistake) is correctly caught
+            # as already-configured; generating a genuinely new key for the
+            # same account is treated as a distinct entry, same as it would
+            # be for any other source's credential rotation.
+            await self.async_set_unique_id(
+                f"{SOURCE_GARMIN}_{hashlib.sha256(api_key.encode()).hexdigest()}"
+            )
             self._abort_if_unique_id_configured()
 
-            source = GarminSource(self.hass, email, password)
+            source = GarminSource(self.hass, api_key)
             try:
                 await source.async_authenticate()
             except WorkoutSourceAuthError:
@@ -194,11 +205,10 @@ class HaWorkoutsConfigFlow(
             except WorkoutSourceError:
                 errors["base"] = "cannot_connect"
             except Exception:
-                _LOGGER.exception("Unexpected error validating Garmin credentials")
+                _LOGGER.exception("Unexpected error validating Garmin API key")
                 errors["base"] = "unknown"
             else:
-                self._email = email
-                self._password = password
+                self._garmin_api_key = api_key
                 return await self.async_step_backfill()
 
         return self.async_show_form(
@@ -423,18 +433,15 @@ class HaWorkoutsConfigFlow(
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
             return self.async_create_entry(
-                # Deliberately just "Garmin", not "Garmin (email)": this title
-                # becomes every entity's device name, and HA slugifies that
-                # into entity_ids — an email address baked into every
-                # sensor.garmin_..._... entity_id is neither pretty nor
-                # something anyone actually wants to look at. If a second
-                # Garmin account is ever added, HA auto-suffixes the
-                # colliding device name (e.g. "Garmin 2") rather than erroring.
+                # Deliberately just "Garmin", not "Garmin (account)": this
+                # title becomes every entity's device name, and HA slugifies
+                # that into entity_ids. If a second Garmin account is ever
+                # added, HA auto-suffixes the colliding device name (e.g.
+                # "Garmin 2") rather than erroring.
                 title="Garmin",
                 data={
                     CONF_SOURCE_TYPE: SOURCE_GARMIN,
-                    CONF_EMAIL: self._email,
-                    CONF_PASSWORD: self._password,
+                    CONF_GARMIN_API_KEY: self._garmin_api_key,
                 },
                 options={CONF_BACKFILL_DAYS: backfill_days},
             )

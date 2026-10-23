@@ -24,6 +24,7 @@ from .const import (
     CONF_COROS_MCP_EXPIRES_AT,
     CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
+    CONF_GARMIN_API_KEY,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
     DEFAULT_COROS_REGION,
@@ -50,7 +51,7 @@ PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.CALENDAR]
 async def _build_source(hass: HomeAssistant, entry: ConfigEntry) -> WorkoutSource:
     source_type = entry.data[CONF_SOURCE_TYPE]
     if source_type == SOURCE_GARMIN:
-        return GarminSource(hass, entry.data[CONF_EMAIL], entry.data[CONF_PASSWORD])
+        return GarminSource(hass, entry.data[CONF_GARMIN_API_KEY])
     if source_type == SOURCE_STRAVA:
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             hass, entry

@@ -4,4 +4,3 @@ logger:
   default: info
   logs:
     custom_components.ha_workouts: debug
-    garminconnect: debug

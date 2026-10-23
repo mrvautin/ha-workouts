@@ -10,10 +10,9 @@
       },
       "garmin": {
         "title": "Connect to Garmin Connect",
-        "description": "Enter your Garmin Connect account credentials. These are used only to authenticate with Garmin's servers and are stored locally in Home Assistant.",
+        "description": "Enter a Garmin Connect Personal API key. This uses Garmin's own official Personal API, not your account password.\n\nTo create one: sign in at connect.garmin.com, go to **Settings → Personal API Key**, click **Create Key**, accept the terms, and choose how long it should last (up to 1 year). Copy the key shown — it's only displayed once.\n\nThe key is stored locally in Home Assistant. When it expires, generate a new one the same way and re-add this integration with it.",
         "data": {
-          "email": "Email",
-          "password": "Password"
+          "garmin_api_key": "Personal API key"
         }
       },
       "coros": {
@@ -121,15 +120,6 @@
       },
       "hrv_status": {
         "name": "HRV status"
-      },
-      "training_readiness_score": {
-        "name": "Training readiness"
-      },
-      "training_readiness_level": {
-        "name": "Training readiness level"
-      },
-      "training_readiness_feedback": {
-        "name": "Training readiness feedback"
       },
       "sleep_score": {
         "name": "Sleep score"

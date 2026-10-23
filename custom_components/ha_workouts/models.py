@@ -87,11 +87,6 @@ class DailySummary:
     #: "BALANCED"/"UNBALANCED"/"LOW" — kept as the source's raw string rather
     #: than normalized, since there's no other source to normalize against yet.
     hrv_status: str | None = None
-    training_readiness_score: int | None = None
-    #: Garmin's own qualitative bucket, e.g. "PRIME"/"HIGH"/"MODERATE"/"LOW"/
-    #: "POOR" — kept as the source's raw string, same reasoning as hrv_status.
-    training_readiness_level: str | None = None
-    training_readiness_feedback: str | None = None
     #: 0-100, from Coros's own MCP querySleepData tool — a genuine numeric
     #: score, unlike hrv_status above which has no Coros equivalent.
     sleep_score: int | None = None

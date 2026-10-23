@@ -14,8 +14,10 @@ or side by side.
 
 ## Supported sources
 
-- **Garmin Connect** — email/password login (unofficial API, no developer
-  account required).
+- **Garmin Connect** — Garmin's official **Personal API** (a self-serve API
+  key you generate yourself in Garmin Connect's own settings — no developer
+  account, app registration, or approval needed; see [Garmin
+  setup](#garmin-setup) below).
 - **Coros** — email/password login (unofficial API, no developer account
   required), plus an optional second connection for steps/sleep/HRV/recovery/
   fitness assessment/training load (see [Coros setup](#coros-setup) below).
@@ -59,13 +61,35 @@ or side by side.
 
 ### Garmin setup
 
-Just enter your Garmin Connect email and password — no developer account or
-API key needed. This uses the unofficial `garminconnect` library to sign in
-the same way the Garmin Connect app does.
+This integration uses Garmin's own official **Personal API** — your account
+password is never entered into Home Assistant. Instead you generate a
+Personal API key yourself:
 
-Garmin's API is unofficial and undocumented, so this integration is
-deliberately conservative about request pacing to avoid tripping its rate
-limits (see [Rate limits](#rate-limits--why-things-might-be-slow) below).
+1. Sign in at [connect.garmin.com](https://connect.garmin.com).
+2. Go to **Settings → Personal API Key**
+   ([direct link](https://connect.garmin.com/app/settings/personalApiToken)).
+3. Click **Create Key**, accept the terms, and choose how long it should last
+   (30/90/180 days, or 1 year).
+4. Copy the key shown — it's only displayed once.
+5. Paste it into this integration's setup form.
+
+**The key eventually expires** (whatever duration you chose, up to 1 year)
+and there's no automatic renewal — Garmin's Personal API has no refresh
+token. When it expires, every sensor will start reporting an authentication
+error. To fix it: generate a new key the same way above, remove this
+integration's Garmin entry, and re-add it with the new key.
+
+One real feature gap versus Garmin's old unofficial API: **Training
+Readiness** (score/level/feedback) has no equivalent in the official Personal
+API — it's simply not exposed anywhere in Garmin's published API, so those
+sensors don't exist for this source. Everything else (steps, HRV with status,
+sleep with stage detail, body battery, VO2max, activities, and per-km/mile
+splits) is available, and some of it is richer than the old unofficial API
+exposed.
+
+Garmin doesn't publish a rate limit for the Personal API, so this integration
+paces its requests conservatively regardless (see [Rate
+limits](#rate-limits--why-things-might-be-slow) below).
 
 ### Coros setup
 
@@ -206,8 +230,11 @@ Setting up the data (make sure all fields are `Text`)
 
 - **Daily summary sensors** (Garmin only — Coros/Strava/Apple Health have no
   equivalent): steps, resting heart rate, active calories, floors climbed,
-  average stress, body battery, VO2 max, HRV (last night average, 7-day
-  average, status), and Training Readiness (score, level, feedback).
+  average stress, body battery, VO2 max, and HRV (last night average, 7-day
+  average, status). Training Readiness is **not** available — Garmin's
+  official Personal API has no equivalent to the old unofficial API's
+  training readiness score/level/feedback (see [Garmin
+  setup](#garmin-setup)).
 - **Coros health & fitness sensors** (only if you connected the optional
   second MCP connection — see [Coros setup](#coros-setup)): steps, active
   calories, sleep score/duration, HRV (last night/7-day average), recovery
@@ -307,14 +334,14 @@ the charts above useful immediately instead of starting from an empty graph.
 
 ## Rate limits / why things might be slow
 
-Garmin's and Coros's APIs are both unofficial and undocumented, so this
-integration paces backfill requests conservatively (20s between request
-batches for both, plus a cooldown after Garmin login) to avoid triggering
-rate limiting — which, if hit, can lock out _all_ API access for that
-account for an extended period, not just the backfill. Strava's documented
-limits are more generous so its pacing is lighter. If you see the history
-import sensor show `backing_off`, this is expected behavior after a rate
-limit, not an error — it will retry automatically.
+Coros's API is unofficial and undocumented, and Garmin's official Personal
+API doesn't publish a request quota either, so this integration paces
+backfill requests conservatively for both (15–20s between request batches)
+to avoid triggering rate limiting — which, if hit, can lock out _all_ API
+access for that account for an extended period, not just the backfill.
+Strava's documented limits are more generous so its pacing is lighter. If
+you see the history import sensor show `backing_off`, this is expected
+behavior after a rate limit, not an error — it will retry automatically.
 
 ## Troubleshooting
 
@@ -325,12 +352,17 @@ strava.com/settings/api, then retry setup. See [Strava
 setup](#strava-setup) above.
 
 **Garmin: repeated "429 Too Many Requests" / integration stuck retrying** —
-Garmin has rate-limited the account, usually from many rapid sign-in
-attempts (e.g. repeatedly restarting Home Assistant in a short window).
-Home Assistant retries automatically with increasing backoff; avoid
-restarting Home Assistant repeatedly while this is happening, as each
-restart re-triggers a fresh sign-in and can extend the lockout. It
-typically clears within 30–60 minutes of being left alone.
+Garmin has rate-limited the account, usually from a burst of requests in a
+short window (e.g. a large history backfill combined with other activity).
+Home Assistant retries automatically with increasing backoff; it typically
+clears within 30–60 minutes of being left alone.
+
+**Garmin: "Garmin Personal API key was rejected" / authentication failed** —
+the Personal API key has expired or was deleted/regenerated in Garmin
+Connect. Generate a new key (see [Garmin setup](#garmin-setup) above),
+remove this integration's Garmin entry, and re-add it with the new key —
+there's no way to update a key in place, since Garmin's Personal API has no
+refresh-token mechanism to renew it automatically.
 
 **Coros: "Coros session expired or was invalidated" repeatedly** — most
 often means you (or another device/app) logged into the Coros app or
@@ -395,7 +427,9 @@ ruff check custom_components/ha_workouts
 - `models.py` — source-agnostic data model (`Activity`, `DailySummary`,
   `FitnessAssessment`, `BodyComposition`)
 - `sources/base.py` — `WorkoutSource` interface each provider implements
-- `sources/garmin.py` — Garmin Connect implementation (unofficial API)
+- `sources/garmin.py` — Garmin Connect implementation, against Garmin's
+  official Personal API (a self-serve, individual-use API key — see [Garmin
+  setup](#garmin-setup))
 - `sources/coros.py` — Coros implementation, against the same unofficial
   Training Hub API `training.coros.com` itself uses (activities, splits,
   and a rough HRV figure); optionally augmented by `sources/coros_mcp.py`

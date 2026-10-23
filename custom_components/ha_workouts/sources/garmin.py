@@ -1,4 +1,45 @@
-"""Garmin Connect data source, backed by the unofficial python-garminconnect library."""
+"""Garmin Connect data source, backed by Garmin's official "Personal API"
+program (https://developer.garmin.com/gc-developer-program/personal/), NOT
+the unofficial garminconnect library this integration used previously.
+
+The Personal API is a genuinely self-serve, individual-use program: a user
+generates their own long-lived API key at
+connect.garmin.com/app/settings/personalApiToken (expiry of their choosing,
+up to 1 year) and that key alone authenticates every request — no app
+registration, no OAuth client_id/secret, no approval queue (unlike Garmin's
+separate, paused, multi-user "Connect Developer Program"). This sidesteps
+the previous approach's real downsides: storing the user's actual Garmin
+account password, and depending on a reverse-engineered, unsupported login
+flow that could break at any time.
+
+Auth is a simple, non-OAuth bearer-token exchange (confirmed against
+Garmin's own official sample client, github.com/garmin/connect-personal-api-python):
+POST the API key (as `Authorization: ApiKey <key>`) to a token endpoint,
+get back a plain-text (NOT JSON) bearer token good for 24h or until the
+underlying key expires, whichever is sooner. There is no refresh token —
+"refreshing" just means repeating the same exchange with the same API key.
+When the key itself expires (up to 1 year after creation), every exchange
+starts failing and the user must generate a new key in Garmin Connect and
+re-enter it via this integration's Reconfigure flow; there is no way to
+renew a key in place.
+
+Confirmed via Garmin's own published OpenAPI spec (extracted from
+developer.garmin.com/gc-developer-program/personal/swagger-docs/) plus live
+calls against a real account:
+- Daily summary, HRV (with status classification), sleep (with stage
+  breakdown), body battery, fitness age, heart rate zones: all present,
+  often richer than the old garminconnect library exposed.
+- VO2max: present, but as a per-activity field (SummarizedActivityDTO.
+  vO2MaxValue) on the activities list, not a separate daily endpoint.
+- Per-km/mile splits: present, but on GET /activity-service/activity/{id}
+  (ActivitySummaryDTO.splitSummaries), NOT the .../workouts endpoint (which
+  only returns a structured *planned* workout's steps/targets, never actual
+  recorded performance).
+- Training Readiness (score/level/feedback): genuinely absent. No endpoint,
+  field, or schema anywhere in Garmin's own spec exposes it. This is the
+  one real feature loss versus the old unofficial library; DailySummary's
+  training_readiness_* fields are simply never populated by this source.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -6,13 +47,9 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
-from garminconnect import (
-    Garmin,
-    GarminConnectAuthenticationError,
-    GarminConnectConnectionError,
-    GarminConnectTooManyRequestsError,
-)
+import aiohttp
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
 from ..models import Activity, ActivitySplit, ActivityType, DailySummary, WorkoutData
 from .base import (
@@ -23,6 +60,9 @@ from .base import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_BASE_URL = "https://personal.connectapi.garmin.com"
+_TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
 
 # Garmin's own activity type keys, mapped to our normalized ActivityType.
 _ACTIVITY_TYPE_MAP: dict[str, ActivityType] = {
@@ -47,27 +87,13 @@ def _map_activity_type(garmin_type: str | None) -> ActivityType:
     return _ACTIVITY_TYPE_MAP.get(garmin_type.lower(), ActivityType.OTHER)
 
 
-def _parse_vo2_max(max_metrics: list[dict[str, Any]] | None) -> float | None:
-    """Extract the running VO2 max estimate from get_max_metrics's response.
-
-    Garmin only recomputes this occasionally (not every day), so an empty
-    list/missing "generic" block for a given date is normal — it means no new
-    estimate that day, not an error. Prefers the precise value (e.g. 52.7)
-    over the rounded one (53.0) Garmin also provides.
-    """
-    if not max_metrics:
-        return None
-    generic = (max_metrics[0] or {}).get("generic") or {}
-    return generic.get("vo2MaxPreciseValue") or generic.get("vo2MaxValue")
-
-
 def _parse_hrv(raw: dict[str, Any] | None) -> tuple[float | None, float | None, str | None]:
-    """Extract (last_night_avg, weekly_avg, status) from get_hrv_data's response.
+    """Extract (last_night_avg, weekly_avg, status) from GET /hrv-service/hrv/{date}.
 
     Returns all-None for a day with no overnight HRV reading yet (e.g. the
-    watch wasn't worn overnight, or hasn't synced) — get_hrv_data can return
-    an empty dict or one with no "hrvSummary" block in that case, which is
-    normal, not an error.
+    watch wasn't worn overnight, or hasn't synced) — the endpoint can return
+    a 200 with no "hrvSummary" block in that case, which is normal, not an
+    error.
     """
     summary = (raw or {}).get("hrvSummary") or {}
     return (
@@ -77,71 +103,62 @@ def _parse_hrv(raw: dict[str, Any] | None) -> tuple[float | None, float | None, 
     )
 
 
-def _parse_training_readiness(
-    raw: list[dict[str, Any]] | None,
-) -> tuple[int | None, str | None, str | None]:
-    """Extract (score, level, feedback) from get_training_readiness's response.
-
-    The endpoint returns a list of readings for the day (one per recompute —
-    e.g. on wake-up, then again through the day as new data arrives), newest
-    first; [0] is always the most current. Empty/missing before the first
-    reading of the day is normal, not an error.
+def _parse_vo2_max_from_activities(activities: list[dict[str, Any]]) -> float | None:
+    """VO2max is attached to individual activities (SummarizedActivityDTO.
+    vO2MaxValue), not a standalone daily endpoint — use the most recent
+    activity (of any type) that actually carries a value, newest first,
+    since that's Garmin's own latest estimate as of that activity.
     """
-    if not raw:
-        return None, None, None
-    latest = raw[0] or {}
-    return (
-        latest.get("score"),
-        latest.get("level"),
-        latest.get("feedbackShort"),
-    )
+    for activity in activities:
+        value = activity.get("vO2MaxValue")
+        if value is not None:
+            return value
+    return None
 
 
 def _parse_splits(raw: dict[str, Any] | None) -> list[ActivitySplit]:
-    """Parse get_activity_splits' response into per-km/mile ActivitySplit records.
+    """Parse GET /activity-service/activity/{id}'s splitSummaries into
+    per-km/mile ActivitySplit records.
 
-    Only "real" auto-laps are kept (intensityType == "INTERVAL") — Garmin's
-    lapDTOs can also include e.g. a trailing "REST" entry for a stopped watch,
-    which isn't a distance split and would throw off the cumulative running
-    totals below.
+    Only "real" auto-laps are kept — Garmin's splitType enum covers many
+    non-distance split kinds (e.g. RWD_STAND/RWD_WALK rest-wristband
+    detection, MARKER_KILOMETER/MARKER_MILE distance markers, interval
+    phases); INTERVAL_ACTIVE is the plain auto-lap type matching what the
+    old garminconnect-based parser treated as "real" laps (intensityType ==
+    "INTERVAL" there).
     """
     if not raw:
         return []
-    lap_dtos = [
-        lap for lap in (raw.get("lapDTOs") or []) if lap.get("intensityType") == "INTERVAL"
+    split_dtos = [
+        split
+        for split in (raw.get("splitSummaries") or [])
+        if split.get("splitType") == "INTERVAL_ACTIVE"
     ]
-    # lapIndex is 1-based and already in chronological order from Garmin, but
-    # sort defensively rather than assume the API always returns them ordered.
-    lap_dtos.sort(key=lambda lap: lap.get("lapIndex", 0))
 
     splits: list[ActivitySplit] = []
     cumulative_distance = 0.0
     cumulative_elapsed = 0.0
-    for lap in lap_dtos:
-        distance = lap.get("distance") or 0.0
-        # elapsedDuration includes any paused/stopped time within the lap;
-        # duration is moving time only. elapsedDuration is what actually
-        # answers "how long, clock-on-wrist, to reach this point" — the thing
-        # asked for — so it's what the cumulative total is built from.
-        elapsed = lap.get("elapsedDuration") or lap.get("duration") or 0.0
+    for index, split in enumerate(split_dtos, start=1):
+        distance = split.get("distance") or 0.0
+        elapsed = split.get("elapsedDuration") or split.get("duration") or 0.0
         cumulative_distance += distance
         cumulative_elapsed += elapsed
 
-        avg_speed = lap.get("averageSpeed")  # metres/second
+        avg_speed = split.get("averageSpeed")  # metres/second
         pace_seconds_per_km = (1000 / avg_speed) if avg_speed else None
 
         splits.append(
             ActivitySplit(
-                index=lap.get("lapIndex", len(splits) + 1),
+                index=index,
                 distance_meters=distance,
-                duration_seconds=lap.get("duration") or 0.0,
+                duration_seconds=split.get("duration") or 0.0,
                 elapsed_seconds=elapsed,
                 cumulative_distance_meters=cumulative_distance,
                 cumulative_elapsed_seconds=cumulative_elapsed,
                 avg_pace_seconds_per_km=pace_seconds_per_km,
-                avg_heart_rate=lap.get("averageHR"),
-                max_heart_rate=lap.get("maxHR"),
-                elevation_gain_meters=lap.get("elevationGain"),
+                avg_heart_rate=split.get("averageHR"),
+                max_heart_rate=split.get("maxHR"),
+                elevation_gain_meters=split.get("elevationGain"),
             )
         )
     return splits
@@ -163,87 +180,134 @@ def _parse_garmin_datetime(value: str | None) -> datetime:
 
 
 class GarminSource(WorkoutSource):
-    """Fetches activity and daily summary data from Garmin Connect."""
+    """Fetches activity and daily summary data from Garmin's official Personal API."""
 
     key = "garmin"
-    # Garmin's API is unofficial and undocumented — no published rate limit to
-    # target, so pace conservatively. sso/signin (login) appears to be on a
-    # stricter/separate limit from the data endpoints (observed 429s there
-    # specifically), hence the extra post-login cooldown.
-    backfill_chunk_pause_seconds = 20.0
-    post_login_pause_seconds = 3.0
+    # Officially documented program, but with no published rate limit — pace
+    # conservatively, matching this integration's existing convention for
+    # every other unofficial/undocumented-limit source.
+    backfill_chunk_pause_seconds = 15.0
 
-    def __init__(self, hass: HomeAssistant, email: str, password: str) -> None:
+    def __init__(self, hass: HomeAssistant, api_key: str) -> None:
         self._hass = hass
-        self._email = email
-        self._password = password
-        self._client: Garmin | None = None
-        # The coordinator's periodic poll and the background history backfill both
-        # call async_fetch*/async_authenticate on this same shared instance. Without
-        # serializing logins, an expired-session moment during a long backfill can
-        # trigger two concurrent login attempts against Garmin's sso/signin endpoint
-        # — exactly the kind of burst that trips its rate limit.
+        self._api_key = api_key
+        self._access_token: str | None = None
+        # Serializes concurrent token exchanges the same way CorosSource's
+        # _mcp_lock/_auth_lock do — the coordinator's periodic poll and the
+        # background history backfill share one GarminSource instance, so an
+        # expired-token moment during a long backfill could otherwise trigger
+        # two concurrent exchanges for no reason.
         self._auth_lock = asyncio.Lock()
+
+    def _client(self) -> aiohttp.ClientSession:
+        return async_get_clientsession(self._hass)
 
     async def async_authenticate(self) -> None:
         async with self._auth_lock:
-            if self._client is not None:
+            if self._access_token is not None:
                 # Another caller already re-authenticated while we were waiting.
                 return
-            client = Garmin(email=self._email, password=self._password)
-            try:
-                await self._hass.async_add_executor_job(client.login)
-            except GarminConnectAuthenticationError as err:
-                raise WorkoutSourceAuthError(
-                    "Invalid Garmin Connect email or password"
-                ) from err
-            except GarminConnectTooManyRequestsError as err:
-                raise WorkoutSourceRateLimitedError(
-                    f"Garmin Connect rate limited the login: {err}"
-                ) from err
-            except GarminConnectConnectionError as err:
-                raise WorkoutSourceError(f"Could not connect to Garmin Connect: {err}") from err
-            self._client = client
-            if self.post_login_pause_seconds:
-                await asyncio.sleep(self.post_login_pause_seconds)
+            await self._async_exchange_token()
+
+    async def _async_exchange_token(self) -> None:
+        """Exchange the long-lived Personal API key for a bearer access
+        token. Not a "login" in the traditional sense — there's no session,
+        just this bearer token, valid up to 24h or until the underlying key
+        itself expires (see module docstring)."""
+        try:
+            async with self._client().post(
+                f"{_BASE_URL}{_TOKEN_PATH}",
+                headers={"Accept": "*/*", "Authorization": f"ApiKey {self._api_key}"},
+            ) as resp:
+                if resp.status == 401:
+                    raise WorkoutSourceAuthError(
+                        "Garmin Personal API key was rejected — it may have expired or been "
+                        "revoked. Generate a new key at Garmin Connect's Personal API Key "
+                        "settings page and reconnect this integration."
+                    )
+                if resp.status == 429:
+                    raise WorkoutSourceRateLimitedError("Garmin Personal API rate limited us")
+                resp.raise_for_status()
+                # Response is the raw bearer token as plain text, NOT JSON —
+                # confirmed against Garmin's own official sample client.
+                token = (await resp.text()).strip()
+        except aiohttp.ClientError as err:
+            raise WorkoutSourceError(f"Could not connect to Garmin Personal API: {err}") from err
+
+        if not token:
+            raise WorkoutSourceAuthError("Garmin Personal API token exchange returned no token")
+        self._access_token = token
 
     async def _async_ensure_authenticated(self) -> None:
-        if self._client is None:
+        if self._access_token is None:
             await self.async_authenticate()
 
-    async def async_fetch(self, target_day: date) -> WorkoutData:
-        await self._async_ensure_authenticated()
-        assert self._client is not None
+    async def _request(
+        self, path: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any] | list[Any]:
+        """GET one endpoint, retrying once with a fresh token on a 401.
 
+        A 401 here means the bearer token itself expired mid-session (normal
+        — it's only valid up to 24h) rather than the underlying API key
+        being bad; _async_exchange_token distinguishes the "key rejected"
+        case at exchange time, above.
+        """
+        await self._async_ensure_authenticated()
+        assert self._access_token is not None
+
+        for attempt in range(2):
+            try:
+                async with self._client().get(
+                    f"{_BASE_URL}{path}",
+                    headers={
+                        "Accept": "application/json",
+                        "Authorization": f"Bearer {self._access_token}",
+                    },
+                    params=params,
+                ) as resp:
+                    if resp.status == 401 and attempt == 0:
+                        self._access_token = None
+                        await self._async_exchange_token()
+                        continue
+                    if resp.status == 401:
+                        raise WorkoutSourceAuthError(
+                            "Garmin Personal API rejected the request even after refreshing "
+                            "the token — the underlying API key has likely expired."
+                        )
+                    if resp.status == 404:
+                        return {}
+                    if resp.status == 429:
+                        raise WorkoutSourceRateLimitedError("Garmin Personal API rate limited us")
+                    resp.raise_for_status()
+                    return await resp.json()
+            except aiohttp.ClientError as err:
+                raise WorkoutSourceError(
+                    f"Error communicating with Garmin Personal API: {err}"
+                ) from err
+        raise WorkoutSourceError("Garmin Personal API request failed after token refresh")
+
+    async def async_fetch(self, target_day: date) -> WorkoutData:
         day_str = target_day.isoformat()
-        try:
-            raw_activities = await self._hass.async_add_executor_job(
-                self._client.get_activities_by_date, day_str, day_str
-            )
-            raw_stats = await self._hass.async_add_executor_job(
-                self._client.get_stats, day_str
-            )
-            raw_max_metrics = await self._hass.async_add_executor_job(
-                self._client.get_max_metrics, day_str
-            )
-            raw_hrv = await self._hass.async_add_executor_job(
-                self._client.get_hrv_data, day_str
-            )
-            raw_training_readiness = await self._hass.async_add_executor_job(
-                self._client.get_training_readiness, day_str
-            )
-        except GarminConnectAuthenticationError as err:
-            # Session expired; force a fresh login on the next refresh.
-            self._client = None
-            raise WorkoutSourceAuthError("Garmin Connect session expired") from err
-        except GarminConnectTooManyRequestsError as err:
-            raise WorkoutSourceRateLimitedError(f"Garmin Connect rate limited us: {err}") from err
-        except GarminConnectConnectionError as err:
-            raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
+
+        raw_activities = await self._request(
+            "/activitylist-service/activities/search/activities",
+            {"start": 0, "limit": 20, "startDate": day_str, "endDate": day_str},
+        )
+        raw_summary = await self._request(
+            "/usersummary-service/v2/dailysummaries",
+            {"startDate": day_str, "endDate": day_str},
+        )
+        raw_hrv = await self._request(f"/hrv-service/hrv/{day_str}")
+        # VO2max rides on activities, but not necessarily TODAY's — fetch a
+        # small recent window so a VO2max estimate from a few days ago still
+        # shows up rather than going blank on days with no new activity.
+        raw_recent_activities = await self._request(
+            "/activitylist-service/activities/search/activities", {"start": 0, "limit": 10}
+        )
 
         activities = [self._parse_activity(item) for item in raw_activities or []]
         summary = self._parse_daily_summary(
-            raw_stats, target_day, raw_max_metrics, raw_hrv, raw_training_readiness
+            raw_summary, target_day, raw_hrv, raw_recent_activities
         )
 
         # Splits are one extra API call per activity — cheap here since a
@@ -262,50 +326,37 @@ class GarminSource(WorkoutSource):
 
         Used both for today's newly-seen activities (see async_fetch above)
         and by the opt-in historical splits backfill job (see
-        statistics_import.async_backfill_activity_splits), which paces calls
-        to this far more conservatively than the main activity/statistics
-        backfill, since Garmin's API charges one full request per activity
-        with no batch/bulk endpoint available.
+        statistics_import.async_backfill_activity_splits). Splits live on
+        the single-activity detail endpoint's splitSummaries field, NOT the
+        .../workouts endpoint (confirmed via Garmin's own OpenAPI spec — see
+        module docstring).
         """
-        await self._async_ensure_authenticated()
-        assert self._client is not None
-
-        try:
-            raw_splits = await self._hass.async_add_executor_job(
-                self._client.get_activity_splits, source_id
-            )
-        except GarminConnectAuthenticationError as err:
-            self._client = None
-            raise WorkoutSourceAuthError("Garmin Connect session expired") from err
-        except GarminConnectTooManyRequestsError as err:
-            raise WorkoutSourceRateLimitedError(f"Garmin Connect rate limited us: {err}") from err
-        except GarminConnectConnectionError as err:
-            raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
-
-        return _parse_splits(raw_splits)
+        raw_activity = await self._request(f"/activity-service/activity/{source_id}")
+        return _parse_splits(raw_activity if isinstance(raw_activity, dict) else None)
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date
     ) -> list[Activity]:
         """Fetch all activities between start_day and end_day (inclusive). Used for backfill."""
-        await self._async_ensure_authenticated()
-        assert self._client is not None
-
-        try:
-            raw_activities = await self._hass.async_add_executor_job(
-                self._client.get_activities_by_date,
-                start_day.isoformat(),
-                end_day.isoformat(),
+        activities: list[Activity] = []
+        start = 0
+        page_size = 100
+        while True:
+            raw_activities = await self._request(
+                "/activitylist-service/activities/search/activities",
+                {
+                    "start": start,
+                    "limit": page_size,
+                    "startDate": start_day.isoformat(),
+                    "endDate": end_day.isoformat(),
+                },
             )
-        except GarminConnectAuthenticationError as err:
-            self._client = None
-            raise WorkoutSourceAuthError("Garmin Connect session expired") from err
-        except GarminConnectTooManyRequestsError as err:
-            raise WorkoutSourceRateLimitedError(f"Garmin Connect rate limited us: {err}") from err
-        except GarminConnectConnectionError as err:
-            raise WorkoutSourceError(f"Error fetching Garmin Connect data: {err}") from err
-
-        return [self._parse_activity(item) for item in raw_activities or []]
+            items = raw_activities if isinstance(raw_activities, list) else []
+            activities.extend(self._parse_activity(item) for item in items)
+            if len(items) < page_size:
+                break
+            start += page_size
+        return activities
 
     def _parse_activity(self, item: dict[str, Any]) -> Activity:
         activity_type_key = (item.get("activityType") or {}).get("typeKey")
@@ -325,35 +376,45 @@ class GarminSource(WorkoutSource):
 
     def _parse_daily_summary(
         self,
-        stats: dict[str, Any],
+        raw_summary: dict[str, Any] | list[Any],
         target_day: date,
-        max_metrics: list[dict[str, Any]] | None,
-        hrv: dict[str, Any] | None,
-        training_readiness: list[dict[str, Any]] | None,
+        raw_hrv: dict[str, Any] | list[Any],
+        raw_recent_activities: dict[str, Any] | list[Any],
     ) -> DailySummary:
-        hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_hrv(hrv)
-        readiness_score, readiness_level, readiness_feedback = _parse_training_readiness(
-            training_readiness
+        summary_days = raw_summary.get("data") if isinstance(raw_summary, dict) else None
+        day_summary = (summary_days or [{}])[-1] if summary_days else {}
+        movement = day_summary.get("movement") or {}
+        calories = day_summary.get("calories") or {}
+        heart_rate = day_summary.get("heartRate") or {}
+        stress = day_summary.get("stress") or {}
+        body_battery = day_summary.get("bodyBattery") or {}
+
+        hrv_last_night_avg, hrv_weekly_avg, hrv_status = _parse_hrv(
+            raw_hrv if isinstance(raw_hrv, dict) else None
         )
+        recent_activities = raw_recent_activities if isinstance(raw_recent_activities, list) else []
+        vo2_max = _parse_vo2_max_from_activities(recent_activities)
+
         return DailySummary(
             source=self.key,
             day=target_day,
-            steps=stats.get("totalSteps"),
-            resting_heart_rate=stats.get("restingHeartRate"),
-            active_calories=stats.get("activeKilocalories"),
-            floors_climbed=stats.get("floorsAscended"),
-            stress_avg=stats.get("averageStressLevel"),
-            body_battery_max=stats.get("bodyBatteryHighestValue"),
-            body_battery_min=stats.get("bodyBatteryLowestValue"),
-            vo2_max=_parse_vo2_max(max_metrics),
+            steps=(movement.get("steps") or {}).get("value"),
+            resting_heart_rate=heart_rate.get("restingValue"),
+            active_calories=calories.get("burnedActive"),
+            floors_climbed=(movement.get("floorsAscended") or {}).get("value"),
+            stress_avg=stress.get("avgLevel"),
+            body_battery_max=body_battery.get("maxValue"),
+            body_battery_min=body_battery.get("minValue"),
+            vo2_max=vo2_max,
             hrv_last_night_avg=hrv_last_night_avg,
             hrv_weekly_avg=hrv_weekly_avg,
             hrv_status=hrv_status,
-            training_readiness_score=readiness_score,
-            training_readiness_level=readiness_level,
-            training_readiness_feedback=readiness_feedback,
+            # Training Readiness has no equivalent in Garmin's official
+            # Personal API — confirmed absent from its published OpenAPI
+            # spec (no endpoint, field, or schema anywhere). Left unset
+            # (None) rather than guessed at; see module docstring.
         )
 
     @classmethod
     def config_schema_fields(cls) -> dict[str, Any]:
-        return {"email": str, "password": str}
+        return {"api_key": str}

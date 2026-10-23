@@ -6,6 +6,15 @@ DOMAIN = "ha_workouts"
 CONF_SOURCE_TYPE = "source_type"
 CONF_BACKFILL_DAYS = "backfill_days"
 
+#: Garmin's official "Personal API" key (see sources/garmin.py's module
+#: docstring) — a single long-lived credential the user generates themselves
+#: at connect.garmin.com/app/settings/personalApiToken, replacing the
+#: email/password login the old unofficial garminconnect library used. No
+#: refresh token exists for this program; the key itself simply expires
+#: (user-chosen, up to 1 year) and must be regenerated and re-entered via
+#: Reconfigure when that happens.
+CONF_GARMIN_API_KEY = "garmin_api_key"
+
 SOURCE_GARMIN = "garmin"
 SOURCE_STRAVA = "strava"
 SOURCE_APPLE_HEALTH = "apple_health"

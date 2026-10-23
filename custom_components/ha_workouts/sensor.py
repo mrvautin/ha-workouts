@@ -117,28 +117,13 @@ DAILY_SUMMARY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
         suggested_display_precision=1,
         value_fn=lambda data: data.daily_summary.vo2_max if data.daily_summary else None,
     ),
-    WorkoutSensorDescription(
-        key="training_readiness_score",
-        translation_key="training_readiness_score",
-        state_class=SensorStateClass.MEASUREMENT,
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_score if data.daily_summary else None
-        ),
-    ),
-    WorkoutSensorDescription(
-        key="training_readiness_level",
-        translation_key="training_readiness_level",
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_level if data.daily_summary else None
-        ),
-    ),
-    WorkoutSensorDescription(
-        key="training_readiness_feedback",
-        translation_key="training_readiness_feedback",
-        value_fn=lambda data: (
-            data.daily_summary.training_readiness_feedback if data.daily_summary else None
-        ),
-    ),
+    # Training Readiness (score/level/feedback) is deliberately NOT a sensor
+    # here: Garmin's official Personal API (see sources/garmin.py's module
+    # docstring) has no equivalent endpoint at all — confirmed absent from
+    # Garmin's own published OpenAPI spec — unlike the unofficial
+    # garminconnect library this integration used previously, which did
+    # expose it. A genuine feature loss from the pivot to official auth, not
+    # a parsing gap; DailySummary no longer even has these fields.
 )
 
 #: HRV sensors — split out from DAILY_SUMMARY_SENSORS since, unlike the rest
