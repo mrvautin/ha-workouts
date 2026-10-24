@@ -184,11 +184,20 @@
       "last_activity_anaerobic_training_effect": {
         "name": "Last activity anaerobic training effect"
       },
-      "last_activity_fastest_5k": {
-        "name": "Last activity fastest 5K split"
+      "personal_best_1km": {
+        "name": "Personal best 1K"
       },
-      "last_activity_fastest_10k": {
-        "name": "Last activity fastest 10K split"
+      "personal_best_5km": {
+        "name": "Personal best 5K"
+      },
+      "personal_best_10km": {
+        "name": "Personal best 10K"
+      },
+      "personal_best_half_marathon": {
+        "name": "Personal best half marathon"
+      },
+      "personal_best_marathon": {
+        "name": "Personal best marathon"
       },
       "activity_duration_minutes": {
         "name": "{activity_type} total duration"

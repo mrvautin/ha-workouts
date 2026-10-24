@@ -101,6 +101,13 @@ from .activity_log import (
 from .backfill_progress import BackfillProgress
 from .const import DOMAIN
 from .models import Activity, ActivityType
+from .personal_bests import (
+    async_has_scanned_history_for_bests,
+    async_mark_history_scanned_for_bests,
+    async_update_personal_bests,
+    async_wipe_personal_bests,
+    async_wipe_personal_bests_scanned_flag,
+)
 from .sources.base import WorkoutSource, WorkoutSourceRateLimitedError
 
 _LOGGER = logging.getLogger(__name__)
@@ -247,15 +254,16 @@ async def async_wipe_source_data(
 ) -> None:
     """Permanently delete every piece of this source's imported data:
     the activity log, the earliest-known-day cache, the per-statistic
-    dedup ledgers, and the recorder's own compiled statistics — both this
-    integration's own external ha_workouts:* series AND the plain
-    entity-attached (sensor.*) statistics HA auto-compiles for any of our
-    sensors that carry a state_class (steps, HRV, recovery, training load,
-    etc.) — entity_ids should be every entity_id this config entry ever had,
-    captured BEFORE unloading (see __init__.py's async_unload_entry) since
-    the entity registry has already forgotten them by the time this runs;
-    omitting them just leaves those orphaned statistics behind with a
-    "no state available" repair notice instead of failing anything.
+    dedup ledgers, the personal-bests record (see personal_bests.py), and
+    the recorder's own compiled statistics — both this integration's own
+    external ha_workouts:* series AND the plain entity-attached (sensor.*)
+    statistics HA auto-compiles for any of our sensors that carry a
+    state_class (steps, HRV, recovery, training load, etc.) — entity_ids
+    should be every entity_id this config entry ever had, captured BEFORE
+    unloading (see __init__.py's async_unload_entry) since the entity
+    registry has already forgotten them by the time this runs; omitting
+    them just leaves those orphaned statistics behind with a "no state
+    available" repair notice instead of failing anything.
 
     entry_slug is a static per-source-type string (e.g. "coros"), NOT tied to
     any one config entry's id (see sensor.py's async_setup_entry) — so this
@@ -299,6 +307,8 @@ async def async_wipe_source_data(
         await _applied_source_ids_store(hass, statistic_id).async_remove()
     await _earliest_known_activity_day_store(hass, entry_slug).async_remove()
     await async_wipe_activity_log(hass, entry_slug)
+    await async_wipe_personal_bests(hass, entry_slug)
+    await async_wipe_personal_bests_scanned_flag(hass, entry_slug)
 
 
 async def async_backfill_activity_statistics(
@@ -381,6 +391,8 @@ async def async_backfill_activity_statistics(
                 by_type_and_day[activity.activity_type][activity.start.date()].append(
                     activity
                 )
+            if activities:
+                await async_update_personal_bests(hass, entry_slug, activities)
 
             earliest_day_reached = chunk_start
             progress.days_imported_this_run += (chunk_end - chunk_start).days + 1
@@ -463,6 +475,105 @@ async def async_backfill_activity_statistics(
         progress.state = "error"
         progress.error = str(err)
         progress.notify()
+
+
+async def async_backfill_personal_bests(
+    hass: HomeAssistant,
+    entry_slug: str,
+    source: WorkoutSource,
+    backfill_days: int,
+    request_lock: asyncio.Lock,
+) -> None:
+    """Walk full activity history ONCE ever (per source, until a full wipe —
+    see personal_bests.async_wipe_personal_bests_scanned_flag) folding every
+    activity's fastest_split_* fields into the persisted personal-bests
+    record (personal_bests.py).
+
+    Deliberately a SEPARATE pass from async_backfill_activity_statistics
+    above, not a side effect of it: that function's own gap-check
+    (_range_fully_covered) skips re-fetching activities entirely once
+    statistics are already imported — which is exactly the state a
+    pre-existing account is in the moment this feature first ships, so
+    folding this into that function would leave such accounts with their
+    personal bests permanently stuck at whatever the live daily poll has
+    happened to see, never actually scanning their real history (a real
+    gap caught in testing: an account whose genuine 5K PB was 19:17, sitting
+    in an activity from weeks earlier, showed nothing until this ran).
+
+    No per-day statistics bucketing, no activity_log writes. For "All
+    available history" (backfill_days=0), this deliberately does NOT
+    independently walk all the way back to 1970 looking for an early-stop
+    the way async_backfill_activity_statistics does — that function has
+    almost certainly already run (it's kicked off first, see sensor.py's
+    async_setup_entry) and already discovered the account's real earliest
+    activity day via its own consecutive-empty-chunks early-stop; this
+    reuses that result as the lower bound instead of re-deriving it, which
+    would otherwise mean walking ~50+ years of guaranteed-empty 90-day
+    chunks at a full backfill_chunk_pause_seconds each — confirmed as a
+    real, reproduced bug in testing (this function was still running,
+    stuck in empty history, many minutes after the main backfill had long
+    since finished). If the earliest day genuinely isn't known yet (e.g.
+    this races ahead of the main backfill finishing), falls back to a
+    bounded 2-year lookback rather than the unbounded 1970 walk — good
+    enough for a personal-bests scan, which self-heals next restart anyway
+    since nothing here is marked complete until a real bound was used.
+    """
+    if await async_has_scanned_history_for_bests(hass, entry_slug):
+        return
+
+    today = dt_util.now().date()
+    end_day = today
+    used_fallback_bound = False
+    if backfill_days == 0:
+        cached_earliest = await async_get_earliest_known_activity_day(hass, entry_slug)
+        if cached_earliest is not None:
+            start_day = cached_earliest
+        else:
+            start_day = today - timedelta(days=730)
+            used_fallback_bound = True
+    else:
+        start_day = today - timedelta(days=backfill_days)
+
+    # Progress isn't surfaced to its own status sensor (unlike the main
+    # backfill/splits backfill) — this is a one-time, best-effort pass with
+    # no user-facing depth setting of its own; it reuses whatever depth the
+    # main backfill is configured for. A throwaway BackfillProgress still
+    # gets _fetch_chunk_with_backoff's rate-limit backoff/retry behavior,
+    # which needs one to signal into, without needing a real sensor.
+    throwaway_progress = BackfillProgress()
+    _LOGGER.debug(
+        "Starting personal-bests history scan for %s: %s to %s%s",
+        entry_slug,
+        start_day,
+        end_day,
+        " (fallback bound, may retry later)" if used_fallback_bound else "",
+    )
+
+    try:
+        chunk_end = end_day
+        while chunk_end >= start_day:
+            chunk_start = max(start_day, chunk_end - timedelta(days=_CHUNK_DAYS - 1))
+            activities = await _fetch_chunk_with_backoff(
+                source, chunk_start, chunk_end, throwaway_progress, request_lock
+            )
+            if activities:
+                await async_update_personal_bests(hass, entry_slug, activities)
+            _LOGGER.debug(
+                "Personal-bests scan fetched %s to %s for %s", chunk_start, chunk_end, entry_slug
+            )
+            chunk_end = chunk_start - timedelta(days=1)
+            if chunk_end >= start_day:
+                await asyncio.sleep(source.backfill_chunk_pause_seconds)
+        # Only mark complete if a real (not the 2-year fallback) bound was
+        # used — the fallback means the main backfill's early-stop hadn't
+        # discovered the account's real earliest day yet, so this scan may
+        # have missed genuinely older history; next restart should retry
+        # with (by then, hopefully) a real bound rather than being
+        # permanently stuck believing an incomplete scan was the full one.
+        if not used_fallback_bound:
+            await async_mark_history_scanned_for_bests(hass, entry_slug)
+    except Exception:  # best-effort: never blocks setup or the main backfill
+        _LOGGER.exception("Personal-bests history scan failed for %s", entry_slug)
 
 
 async def _fetch_chunk_with_backoff(

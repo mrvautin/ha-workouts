@@ -23,9 +23,16 @@ class BackfillProgress:
     activity/statistics backfill (statistics_import.async_backfill_activity_statistics)
     and the opt-in splits backfill (activity_log.async_backfill_activity_splits).
 
-    on_change is set by the status sensor to a HA @callback (async_write_ha_state)
-    so it can push updates to itself the moment progress changes, instead of polling.
-    Must only be invoked from the event loop, same as the rest of this module.
+    listeners holds zero or more HA @callbacks (typically async_write_ha_state,
+    or a small wrapper around it) so each interested entity can push updates
+    to itself the moment progress changes, instead of polling. A single
+    coordinator.backfill_progress instance is shared by every entity that
+    cares about this same backfill (e.g. BackfillStatusSensor,
+    HistoryStartSensor, and now one PersonalBestSensor per tracked distance)
+    — a single on_change slot here would silently let only the LAST one to
+    register ever see updates, clobbering the others' (a real bug this
+    list replaced). Must only be invoked from the event loop, same as the
+    rest of this module.
     """
 
     state: str = "idle"  # idle | running | backing_off | complete | error
@@ -33,8 +40,8 @@ class BackfillProgress:
     target_day: date | None = None
     days_imported_this_run: int = 0
     error: str | None = None
-    on_change: Callable[[], None] | None = field(default=None, compare=False)
+    listeners: list[Callable[[], None]] = field(default_factory=list, compare=False)
 
     def notify(self) -> None:
-        if self.on_change is not None:
-            self.on_change()
+        for listener in self.listeners:
+            listener()

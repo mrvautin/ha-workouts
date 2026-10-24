@@ -39,10 +39,13 @@ from .const import (
 from .coordinator import WorkoutDataUpdateCoordinator
 from .models import Activity, ActivityType, WorkoutData
 from .period_sensors import PeriodTotals, async_get_period_totals
+from .personal_bests import DISTANCES as PERSONAL_BEST_DISTANCES
+from .personal_bests import async_get_personal_bests
 from .statistics_import import (
     DISTANCE_ACTIVITY_TYPES,
     async_apply_activity_deltas,
     async_backfill_activity_statistics,
+    async_backfill_personal_bests,
     async_get_earliest_known_activity_day,
     entity_id_slug,
     statistic_id_slug,
@@ -386,27 +389,14 @@ LAST_ACTIVITY_DETAIL_SENSORS: tuple[WorkoutSensorDescription, ...] = (
             data.activities[-1].anaerobic_training_effect if data.activities else None
         ),
     ),
-    WorkoutSensorDescription(
-        key="last_activity_fastest_5k",
-        translation_key="last_activity_fastest_5k",
-        # A "H:MM:SS"/"M:SS" string, not a number+unit — same reasoning as
-        # fitness_threshold_pace's own docstring: nobody reads a split time
-        # as raw seconds.
-        value_fn=lambda data: (
-            _format_duration(data.activities[-1].fastest_split_5km_seconds)
-            if data.activities
-            else None
-        ),
-    ),
-    WorkoutSensorDescription(
-        key="last_activity_fastest_10k",
-        translation_key="last_activity_fastest_10k",
-        value_fn=lambda data: (
-            _format_duration(data.activities[-1].fastest_split_10km_seconds)
-            if data.activities
-            else None
-        ),
-    ),
+    # Deliberately NO "last activity fastest split" sensors here (previously
+    # last_activity_fastest_5k/10k): Garmin's fastestSplit_* field is the
+    # fastest CONTINUOUS split WITHIN that one activity, not a personal
+    # best — a real, user-reported confusion (a slower run's "fastest 5K"
+    # showing 24:08 while the user's genuine all-time 5K PB, sitting in an
+    # activity from weeks earlier, was 19:17). See personal_bests.py and
+    # PERSONAL_BEST_SENSORS below for the actual all-time-best tracking
+    # this was replaced with.
 )
 
 #: Source types whose API exposes device-level daily stats (steps, HR, etc.).
@@ -634,9 +624,22 @@ async def async_setup_entry(
         coordinator.backfill_progress.state = "complete"
         _add_activity_type_sensors()
     else:
-        async_add_entities(
-            [HistoryStartSensor(coordinator, entry, entry_slug, coordinator.backfill_progress)]
-        )
+        history_entities: list[SensorEntity] = [
+            HistoryStartSensor(coordinator, entry, entry_slug, coordinator.backfill_progress)
+        ]
+        if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
+            history_entities.extend(
+                PersonalBestSensor(
+                    coordinator,
+                    entry,
+                    entry_slug,
+                    coordinator.backfill_progress,
+                    distance_key,
+                    f"personal_best_{distance_key}",
+                )
+                for distance_key, _ in PERSONAL_BEST_DISTANCES
+            )
+        async_add_entities(history_entities)
         # Backfill historical per-type statistics in the background so setup isn't
         # blocked by what can be a long-running, multi-year import. Progress is
         # exposed via coordinator.backfill_progress / the status sensor above.
@@ -674,6 +677,25 @@ async def async_setup_entry(
                     coordinator.source,
                     backfill_days,
                     coordinator.splits_backfill_progress,
+                    coordinator.request_lock,
+                )
+            )
+        if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
+            # One-time (per source, until a full wipe) history scan feeding
+            # the PersonalBestSensor entities created above — see
+            # statistics_import.async_backfill_personal_bests's docstring
+            # for why this must be a separate pass rather than piggybacking
+            # on the statistics backfill above (which skips re-fetching
+            # activities entirely once statistics are already covered,
+            # which would otherwise leave personal bests permanently stuck
+            # on an account that already had its statistics imported before
+            # this feature existed).
+            hass.async_create_task(
+                async_backfill_personal_bests(
+                    hass,
+                    entry_slug,
+                    coordinator.source,
+                    backfill_days,
                     coordinator.request_lock,
                 )
             )
@@ -982,10 +1004,10 @@ class BackfillStatusSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sens
         # progress updates independently of the coordinator's own refresh
         # cycle (it's mutated from the background backfill task), so push a
         # state write from there directly rather than polling for changes.
-        self._progress.on_change = self._handle_progress_change
+        self._progress.listeners.append(self._handle_progress_change)
 
     async def async_will_remove_from_hass(self) -> None:
-        self._progress.on_change = None
+        self._progress.listeners.remove(self._handle_progress_change)
         await super().async_will_remove_from_hass()
 
     @callback
@@ -1053,11 +1075,11 @@ class HistoryStartSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sensor
         # The persisted value only changes when the backfill's early-stop
         # fires, which is signalled the same way BackfillStatusSensor learns
         # of progress — piggyback on that rather than polling.
-        self._progress.on_change = self._handle_progress_change
+        self._progress.listeners.append(self._handle_progress_change)
         await self._async_refresh_value()
 
     async def async_will_remove_from_hass(self) -> None:
-        self._progress.on_change = None
+        self._progress.listeners.remove(self._handle_progress_change)
         await super().async_will_remove_from_hass()
 
     @callback
@@ -1073,6 +1095,76 @@ class HistoryStartSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], Sensor
     @property
     def native_value(self) -> date | None:
         return self._earliest_day
+
+
+class PersonalBestSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):
+    """Reports the all-time fastest split ever seen for one named running
+    distance (1K/5K/10K/half marathon/marathon) — see personal_bests.py's
+    module docstring for why this is a genuinely different, more useful
+    figure than a single activity's own "fastest split within itself"
+    (which is what the old last_activity_fastest_5k/10k sensors showed,
+    removed in favour of this).
+
+    Two independent paths update the underlying persisted record: the live
+    coordinator poll (today's new activities might set a new best) and the
+    historical backfill (every activity ever fetched is folded in,
+    chunk-by-chunk). This entity listens to both: the coordinator's own
+    personal_best_update_listeners list for the live-poll path, and
+    BackfillProgress.listeners for the backfill path — matching
+    HistoryStartSensor's dual-source pattern for the same reason (the
+    persisted value can change from either).
+    """
+
+    _attr_has_entity_name = True
+
+    def __init__(
+        self,
+        coordinator: WorkoutDataUpdateCoordinator,
+        entry: ConfigEntry,
+        entry_slug: str,
+        progress: BackfillProgress,
+        distance_key: str,
+        translation_key: str,
+    ) -> None:
+        super().__init__(coordinator)
+        self._entry_slug = entry_slug
+        self._progress = progress
+        self._distance_key = distance_key
+        self._attr_unique_id = f"{entry.entry_id}_personal_best_{distance_key}"
+        self._attr_translation_key = translation_key
+        self._attr_device_info = DeviceInfo(
+            identifiers={(DOMAIN, entry.entry_id)},
+            name=entry.title,
+            manufacturer=coordinator.source.key.capitalize(),
+        )
+        self._best_seconds: float | None = None
+
+    async def async_added_to_hass(self) -> None:
+        await super().async_added_to_hass()
+        self._progress.listeners.append(self._handle_external_change)
+        self.coordinator.personal_best_update_listeners.append(self._handle_external_change)
+        await self._async_refresh_value()
+
+    async def async_will_remove_from_hass(self) -> None:
+        self._progress.listeners.remove(self._handle_external_change)
+        self.coordinator.personal_best_update_listeners.remove(self._handle_external_change)
+        await super().async_will_remove_from_hass()
+
+    @callback
+    def _handle_external_change(self) -> None:
+        self.hass.async_create_task(self._async_refresh_value())
+
+    async def _async_refresh_value(self) -> None:
+        bests = await async_get_personal_bests(self.hass, self._entry_slug)
+        self._best_seconds = bests.get(self._distance_key)
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> str | None:
+        # A "H:MM:SS"/"M:SS" string, not a number+unit — same reasoning as
+        # fitness_threshold_pace's own docstring: nobody reads a split time
+        # as raw seconds.
+        return _format_duration(self._best_seconds)
 
 
 class LastUpdatedSensor(CoordinatorEntity[WorkoutDataUpdateCoordinator], SensorEntity):

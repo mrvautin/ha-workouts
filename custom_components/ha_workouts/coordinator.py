@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import datetime
 
 from homeassistant.config_entries import ConfigEntry
@@ -14,6 +15,7 @@ from .activity_log import async_record_activities
 from .backfill_progress import BackfillProgress
 from .const import CONSISTENCY_CHECK_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
+from .personal_bests import async_update_personal_bests
 from .sources.base import WorkoutSource, WorkoutSourceAuthError, WorkoutSourceError
 from .statistics_import import async_check_statistics_consistency
 
@@ -55,6 +57,17 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
         # immediately so a fresh install/reload gets one early check rather
         # than waiting a full CONSISTENCY_CHECK_INTERVAL for the first one.
         self._next_consistency_check = dt_util.now()
+        # Called (each, in turn) whenever this poll updates a personal best —
+        # lets sensor.py's PersonalBestSensor push a fresh state immediately
+        # rather than waiting for its own next unrelated state write. A list,
+        # not a single callback slot, since there's one PersonalBestSensor
+        # per tracked distance (1K/5K/10K/half/marathon) all sharing this one
+        # coordinator. The backfill path
+        # (statistics_import.async_backfill_activity_statistics) updates the
+        # same persisted store directly and signals through its own
+        # BackfillProgress.on_change instead, since it runs outside any
+        # single coordinator poll.
+        self.personal_best_update_listeners: list[Callable[[], None]] = []
 
     @callback
     def async_mark_updated_now(self) -> None:
@@ -70,6 +83,18 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
                 raise UpdateFailed(f"Error communicating with {self.source.key}: {err}") from err
             self.async_mark_updated_now()
 
+        # Every "last activity" sensor (sensor.py's LAST_ACTIVITY_SENSORS/
+        # LAST_ACTIVITY_DETAIL_SENSORS) reads data.activities[-1] expecting
+        # it to be the most recently started activity — but no source's
+        # async_fetch is required to return activities in any particular
+        # order (confirmed: Garmin's activity-list API returns newest-first,
+        # the opposite of what [-1] needs), and a day with more than one
+        # activity makes this a real, user-hit bug otherwise (a 5K split
+        # sensor reporting an earlier run's time, not today's). Sorting
+        # here, once, right after fetch, is what makes [-1] actually mean
+        # "most recent" regardless of any individual source's response order.
+        data.activities.sort(key=lambda activity: activity.start)
+
         # Outside the request_lock/try block above: neither of these makes a
         # source API call (activity_log only writes to local storage; the
         # consistency check only reads already-stored statistics), so neither
@@ -77,6 +102,9 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
         # failure in either shouldn't be treated as a fetch failure.
         if data.activities:
             await async_record_activities(self.hass, self.source.key, data.activities)
+            await async_update_personal_bests(self.hass, self.source.key, data.activities)
+            for listener in self.personal_best_update_listeners:
+                listener()
 
         now = dt_util.now()
         if now >= self._next_consistency_check:
