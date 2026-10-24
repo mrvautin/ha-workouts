@@ -17,6 +17,7 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo, EntityCategory
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
@@ -532,6 +533,48 @@ def _build_activity_type_sensors() -> tuple[CumulativeSensorDescription, ...]:
 ACTIVITY_TYPE_SENSORS: tuple[CumulativeSensorDescription, ...] = _build_activity_type_sensors()
 
 
+@callback
+def _async_remove_stale_entities(
+    hass: HomeAssistant, entry: ConfigEntry, current_unique_ids: set[str]
+) -> None:
+    """Remove any sensor entity this config entry has in the registry whose
+    unique_id ISN'T one current_unique_ids says this run actually created.
+
+    Every unique_id this integration ever generates is deterministic
+    (f"{entry.entry_id}_{key}", for some static key) — see the various
+    self._attr_unique_id assignments throughout this module — so a
+    unique_id left in the registry but absent from current_unique_ids can
+    only mean one thing: an OLDER version of this code created it and the
+    current version no longer does (e.g. a WorkoutSensorDescription that
+    was since removed, like the vo2_max/training_readiness_*/
+    last_activity_fastest_5k/10k sensors removed earlier this project).
+    Those entities then sit forever showing "unavailable" with no value_fn
+    ever writing to them again — a real, repeatedly-hit annoyance this
+    session alone (confirmed manually via the entity registry each time) —
+    rather than being an intentional, temporarily-unpopulated entity.
+
+    Called once per setup run, after every entity this run creates has
+    actually been added (see async_setup_entry's _add_activity_type_sensors,
+    the single completion point for both the Apple Health synchronous path
+    and the backfill-gated async path other sources use) — calling this any
+    earlier would incorrectly treat not-yet-created-but-legitimate entities
+    (e.g. the activity-type/period-to-date sensors, which aren't added until
+    the backfill finishes) as stale and delete them.
+    """
+    registry = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            registry_entry.platform == DOMAIN
+            and registry_entry.domain == "sensor"
+            and registry_entry.unique_id not in current_unique_ids
+        ):
+            _LOGGER.info(
+                "Removing stale ha_workouts entity %s (no longer created by current code)",
+                registry_entry.entity_id,
+            )
+            registry.async_remove(registry_entry.entity_id)
+
+
 async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
@@ -585,6 +628,21 @@ async def async_setup_entry(
             )
         )
     async_add_entities(entities)
+    # Tracks every unique_id this run actually creates, across both this
+    # immediate batch and the activity-type batch added later (see
+    # _add_activity_type_sensors) — used by _async_remove_stale_entities
+    # below to find and remove anything left over from an OLDER version of
+    # this code that no longer creates it (e.g. a sensor description that
+    # was since deleted). Entities carry their own unique_id as
+    # self._attr_unique_id, so this just mirrors that same f-string shape
+    # rather than reading it back off each constructed entity.
+    current_unique_ids = {f"{entry.entry_id}_{description.key}" for description in summary_descriptions}
+    if has_coros_mcp:
+        current_unique_ids.add(f"{entry.entry_id}_coros_mcp_debug_log")
+    current_unique_ids.add(f"{entry.entry_id}_backfill_status")
+    current_unique_ids.add(f"{entry.entry_id}_last_updated")
+    if source_type == SOURCE_GARMIN:
+        current_unique_ids.add(f"{entry.entry_id}_splits_backfill_status")
 
     def _add_activity_type_sensors(_task: object | None = None) -> None:
         activity_entities = [
@@ -614,6 +672,15 @@ async def async_setup_entry(
             for period in ("week", "month", "year")
         )
         async_add_entities(activity_entities)
+        current_unique_ids.update(
+            f"{entry.entry_id}_{description.key}" for description in ACTIVITY_TYPE_SENSORS
+        )
+        current_unique_ids.update(
+            f"{entry.entry_id}_{activity_type.value}_{period}td"
+            for activity_type in ActivityType
+            for period in ("week", "month", "year")
+        )
+        _async_remove_stale_entities(hass, entry, current_unique_ids)
 
     if entry.data.get(CONF_SOURCE_TYPE) == SOURCE_APPLE_HEALTH:
         # Apple Health has no historical archive to backfill from (see
@@ -627,6 +694,7 @@ async def async_setup_entry(
         history_entities: list[SensorEntity] = [
             HistoryStartSensor(coordinator, entry, entry_slug, coordinator.backfill_progress)
         ]
+        current_unique_ids.add(f"{entry.entry_id}_history_start")
         if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
             history_entities.extend(
                 PersonalBestSensor(
@@ -637,6 +705,10 @@ async def async_setup_entry(
                     distance_key,
                     f"personal_best_{distance_key}",
                 )
+                for distance_key, _ in PERSONAL_BEST_DISTANCES
+            )
+            current_unique_ids.update(
+                f"{entry.entry_id}_personal_best_{distance_key}"
                 for distance_key, _ in PERSONAL_BEST_DISTANCES
             )
         async_add_entities(history_entities)

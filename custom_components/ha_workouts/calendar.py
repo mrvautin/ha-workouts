@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from homeassistant.components.calendar import CalendarEntity, CalendarEvent
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity import DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.util import dt as dt_util
@@ -38,6 +39,21 @@ async def async_setup_entry(
             for activity_type in ActivityType
         ]
     )
+    # Same stale-entity cleanup as sensor.py's _async_remove_stale_entities
+    # — here unconditionally one-per-ActivityType today, so this is a no-op
+    # unless/until ActivityType itself ever shrinks, but kept consistent
+    # with sensor.py rather than silently relying on that never happening.
+    current_unique_ids = {
+        f"{entry.entry_id}_{activity_type.value}_calendar" for activity_type in ActivityType
+    }
+    registry = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(registry, entry.entry_id):
+        if (
+            registry_entry.platform == DOMAIN
+            and registry_entry.domain == "calendar"
+            and registry_entry.unique_id not in current_unique_ids
+        ):
+            registry.async_remove(registry_entry.entity_id)
 
 
 def _format_pace(seconds_per_km: float | None) -> str | None:
