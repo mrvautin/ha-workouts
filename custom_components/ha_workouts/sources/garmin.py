@@ -360,6 +360,28 @@ class GarminSource(WorkoutSource):
             max_heart_rate=item.get("maxHR"),
             elevation_gain_meters=item.get("elevationGain"),
             name=item.get("activityName"),
+            # All of the below ride on this same SummarizedActivityDTO
+            # response — no extra API call, see models.py's Activity docstring.
+            avg_running_cadence_spm=item.get("averageRunningCadenceInStepsPerMinute"),
+            max_running_cadence_spm=item.get("maxRunningCadenceInStepsPerMinute"),
+            avg_cycling_cadence_rpm=item.get("averageBikingCadenceInRevPerMinute"),
+            max_cycling_cadence_rpm=item.get("maxBikingCadenceInRevPerMinute"),
+            avg_power_watts=item.get("avgPower"),
+            max_power_watts=item.get("maxPower"),
+            normalized_power_watts=item.get("normPower"),
+            avg_vertical_oscillation_cm=item.get("avgVerticalOscillation"),
+            avg_vertical_ratio_percent=item.get("avgVerticalRatio"),
+            avg_ground_contact_time_ms=item.get("avgGroundContactTime"),
+            aerobic_training_effect=item.get("aerobicTrainingEffect"),
+            anaerobic_training_effect=item.get("anaerobicTrainingEffect"),
+            aerobic_training_effect_label=item.get("aerobicTrainingEffectMessage"),
+            anaerobic_training_effect_label=item.get("anaerobicTrainingEffectMessage"),
+            training_load=item.get("activityTrainingLoad"),
+            fastest_split_1km_seconds=item.get("fastestSplit_1000"),
+            fastest_split_5km_seconds=item.get("fastestSplit_5000"),
+            fastest_split_10km_seconds=item.get("fastestSplit_10000"),
+            fastest_split_half_marathon_seconds=item.get("fastestSplit_21098"),
+            fastest_split_marathon_seconds=item.get("fastestSplit_42195"),
         )
 
     def _parse_daily_summary(

@@ -290,6 +290,125 @@ LAST_ACTIVITY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
     ),
 )
 
+#: Running form / power / training-load sensors for the most recent
+#: activity — currently only populated by Garmin's official Personal API
+#: (see sources/garmin.py's Activity-parsing docstring and
+#: SOURCES_WITH_ACTIVITY_DETAIL below). Each value_fn guards against both
+#: "no activities yet" AND "most recent activity doesn't report this field"
+#: (e.g. cadence stays None for a strength-training activity) the same way
+#: LAST_ACTIVITY_SENSORS above does.
+LAST_ACTIVITY_DETAIL_SENSORS: tuple[WorkoutSensorDescription, ...] = (
+    WorkoutSensorDescription(
+        key="last_activity_running_cadence",
+        translation_key="last_activity_running_cadence",
+        native_unit_of_measurement="spm",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.activities[-1].avg_running_cadence_spm if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_cycling_cadence",
+        translation_key="last_activity_cycling_cadence",
+        native_unit_of_measurement="rpm",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.activities[-1].avg_cycling_cadence_rpm if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_avg_power",
+        translation_key="last_activity_avg_power",
+        native_unit_of_measurement="W",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.activities[-1].avg_power_watts if data.activities else None,
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_max_power",
+        translation_key="last_activity_max_power",
+        native_unit_of_measurement="W",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.activities[-1].max_power_watts if data.activities else None,
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_normalized_power",
+        translation_key="last_activity_normalized_power",
+        native_unit_of_measurement="W",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.activities[-1].normalized_power_watts if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_vertical_oscillation",
+        translation_key="last_activity_vertical_oscillation",
+        native_unit_of_measurement="cm",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: (
+            data.activities[-1].avg_vertical_oscillation_cm if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_ground_contact_time",
+        translation_key="last_activity_ground_contact_time",
+        native_unit_of_measurement="ms",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.activities[-1].avg_ground_contact_time_ms if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_training_load",
+        translation_key="last_activity_training_load",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=0,
+        value_fn=lambda data: data.activities[-1].training_load if data.activities else None,
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_aerobic_training_effect",
+        translation_key="last_activity_aerobic_training_effect",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: (
+            data.activities[-1].aerobic_training_effect if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_anaerobic_training_effect",
+        translation_key="last_activity_anaerobic_training_effect",
+        state_class=SensorStateClass.MEASUREMENT,
+        suggested_display_precision=1,
+        value_fn=lambda data: (
+            data.activities[-1].anaerobic_training_effect if data.activities else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_fastest_5k",
+        translation_key="last_activity_fastest_5k",
+        # A "H:MM:SS"/"M:SS" string, not a number+unit — same reasoning as
+        # fitness_threshold_pace's own docstring: nobody reads a split time
+        # as raw seconds.
+        value_fn=lambda data: (
+            _format_duration(data.activities[-1].fastest_split_5km_seconds)
+            if data.activities
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="last_activity_fastest_10k",
+        translation_key="last_activity_fastest_10k",
+        value_fn=lambda data: (
+            _format_duration(data.activities[-1].fastest_split_10km_seconds)
+            if data.activities
+            else None
+        ),
+    ),
+)
+
 #: Source types whose API exposes device-level daily stats (steps, HR, etc.).
 SOURCES_WITH_DAILY_SUMMARY = {SOURCE_GARMIN}
 
@@ -297,6 +416,25 @@ SOURCES_WITH_DAILY_SUMMARY = {SOURCE_GARMIN}
 #: narrower set than SOURCES_WITH_DAILY_SUMMARY above, since Coros only ever
 #: populates those three fields, never the rest (steps, body battery, etc.).
 SOURCES_WITH_HRV = {SOURCE_GARMIN, SOURCE_COROS}
+
+#: Source types whose API populates Activity's running-form/power/
+#: training-load fields (see models.py's Activity docstring) — currently
+#: Garmin only.
+SOURCES_WITH_ACTIVITY_DETAIL = {SOURCE_GARMIN}
+
+
+def _format_duration(total_seconds: float | None) -> str | None:
+    """Format a duration in seconds as "M:SS" (or "H:MM:SS" past an hour) —
+    the way a split/race time is actually read, not a raw seconds count.
+    """
+    if total_seconds is None:
+        return None
+    seconds = round(total_seconds)
+    hours, remainder = divmod(seconds, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
 
 
 def _format_pace(seconds_per_km: float | None) -> str | None:
@@ -420,6 +558,8 @@ async def async_setup_entry(
     # in SOURCES_WITH_HRV without being in SOURCES_WITH_DAILY_SUMMARY.
     if source_type in SOURCES_WITH_HRV:
         summary_descriptions = list(HRV_SENSORS) + summary_descriptions
+    if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
+        summary_descriptions = list(LAST_ACTIVITY_DETAIL_SENSORS) + summary_descriptions
     # Per-entry, not per-source-type: whether THIS Coros entry has MCP
     # connected (see config_flow.py's async_step_coros_mcp) — a user can
     # have a Coros entry with or without it.

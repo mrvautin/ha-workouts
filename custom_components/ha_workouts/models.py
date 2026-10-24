@@ -63,6 +63,45 @@ class Activity:
     #: which would mean "fetched, but the activity genuinely had no laps".
     splits: list[ActivitySplit] | None = None
 
+    # --- Running/cycling form, power, and training-load fields ------------
+    # Currently populated only by Garmin's official Personal API (see
+    # sources/garmin.py) — these ride along on the SAME activities-list
+    # response _parse_activity already reads for every other field above,
+    # so there's no extra API cost to carrying them. None for any source/
+    # activity that doesn't report a given metric (e.g. cadence fields stay
+    # None for a strength-training activity).
+    avg_running_cadence_spm: float | None = None
+    max_running_cadence_spm: float | None = None
+    avg_cycling_cadence_rpm: float | None = None
+    max_cycling_cadence_rpm: float | None = None
+    avg_power_watts: float | None = None
+    max_power_watts: float | None = None
+    normalized_power_watts: float | None = None
+    avg_vertical_oscillation_cm: float | None = None
+    avg_vertical_ratio_percent: float | None = None
+    avg_ground_contact_time_ms: float | None = None
+    #: Garmin's 0-5 scale rating how much the activity trained the aerobic/
+    #: anaerobic system — see aerobic_training_effect_label for the matching
+    #: human-readable classification (e.g. "IMPROVING_AEROBIC_ENDURANCE_9").
+    aerobic_training_effect: float | None = None
+    anaerobic_training_effect: float | None = None
+    aerobic_training_effect_label: str | None = None
+    anaerobic_training_effect_label: str | None = None
+    #: Garmin's single-activity training load figure (feeds into the
+    #: account-level acute/chronic load Garmin Connect's own app shows, but
+    #: that aggregate isn't available via the Personal API — see
+    #: sources/garmin.py's module docstring).
+    training_load: float | None = None
+    #: Fastest continuous split of each named distance WITHIN this activity,
+    #: in seconds — e.g. the fastest 5k during a longer run, not necessarily
+    #: the whole activity's distance. None if the activity was shorter than
+    #: that distance or the source doesn't report it.
+    fastest_split_1km_seconds: float | None = None
+    fastest_split_5km_seconds: float | None = None
+    fastest_split_10km_seconds: float | None = None
+    fastest_split_half_marathon_seconds: float | None = None
+    fastest_split_marathon_seconds: float | None = None
+
 
 @dataclass(slots=True)
 class DailySummary:

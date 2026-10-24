@@ -154,6 +154,42 @@
       "last_activity_duration": {
         "name": "Last activity duration"
       },
+      "last_activity_running_cadence": {
+        "name": "Last activity running cadence"
+      },
+      "last_activity_cycling_cadence": {
+        "name": "Last activity cycling cadence"
+      },
+      "last_activity_avg_power": {
+        "name": "Last activity average power"
+      },
+      "last_activity_max_power": {
+        "name": "Last activity max power"
+      },
+      "last_activity_normalized_power": {
+        "name": "Last activity normalized power"
+      },
+      "last_activity_vertical_oscillation": {
+        "name": "Last activity vertical oscillation"
+      },
+      "last_activity_ground_contact_time": {
+        "name": "Last activity ground contact time"
+      },
+      "last_activity_training_load": {
+        "name": "Last activity training load"
+      },
+      "last_activity_aerobic_training_effect": {
+        "name": "Last activity aerobic training effect"
+      },
+      "last_activity_anaerobic_training_effect": {
+        "name": "Last activity anaerobic training effect"
+      },
+      "last_activity_fastest_5k": {
+        "name": "Last activity fastest 5K split"
+      },
+      "last_activity_fastest_10k": {
+        "name": "Last activity fastest 10K split"
+      },
       "activity_duration_minutes": {
         "name": "{activity_type} total duration"
       },
