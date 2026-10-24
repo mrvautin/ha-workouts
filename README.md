@@ -250,6 +250,11 @@ Setting up the data (make sure all fields are `Text`)
   the examples below show — the cumulative value itself isn't meant to be
   read directly.
 - **Last activity**: name, type, duration of your most recent workout.
+  Garmin also gets running-form, power, and training-load detail for the
+  most recent activity: running/cycling cadence, power (average, max,
+  normalized), vertical oscillation, ground contact time, aerobic/anaerobic
+  training effect, training load, and fastest 5K/10K split within the
+  activity.
 - **History import status** (`..._history_import_status`, Garmin/Coros/Strava
   only): shows backfill progress (`idle` / `running` / `backing_off` /
   `complete` / `error`) and how far back it's reached — useful to watch
@@ -257,6 +262,41 @@ Setting up the data (make sure all fields are `Text`)
   [History backfill](#history-backfill). Apple Health doesn't have this
   sensor — its history arrives directly via the Shortcut rather than a
   paced background job, so there's no progress to report.
+
+## Letting an AI assistant query your data (MCP)
+
+This integration doesn't ship its own MCP server — it doesn't need to. Home
+Assistant has a built-in **Model Context Protocol Server** integration that
+can expose any entity you choose, including every sensor this integration
+creates, to an MCP-capable AI assistant (Claude, etc.). Once set up, you can
+ask things like "what was my training load on my last run?" or "how many km
+have I run this month?" and the assistant can look up the real answer from
+your actual sensors.
+
+Setup:
+
+1. **Settings → Devices & Services → Add Integration**, search for "Model
+   Context Protocol Server", and add it. This creates a `/mcp_server/sse`
+   endpoint secured by a Home Assistant long-lived access token.
+2. Choose which entities it can see via **Settings → Voice assistants →
+   Expose** (the same exposed-entities list Assist uses) — tick the
+   `ha_workouts` sensors you want queryable (e.g.
+   `sensor.garmin_running_distance_km`,
+   `sensor.garmin_last_activity_training_load`,
+   `sensor.coros_threshold_pace`). Only exposed entities are visible over
+   MCP — nothing is exposed by default.
+3. Generate a long-lived access token for your Home Assistant user
+   (**Profile → Security → Long-lived access tokens**) and configure your
+   MCP client (Claude Desktop, Claude Code, etc.) to connect to your Home
+   Assistant's `/mcp_server/sse` endpoint with that token — see [Home
+   Assistant's own MCP Server
+   docs](https://www.home-assistant.io/integrations/mcp_server/) for the
+   exact client-side configuration, which varies by MCP client.
+
+Once connected, the assistant can read (and, depending on what you expose,
+act on) any exposed `ha_workouts` entity like any other Home Assistant
+entity — no special handling needed on this integration's side, since it's
+just sensors like any other.
 
 ## Charting your data
 
