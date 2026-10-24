@@ -117,7 +117,26 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # Nothing to fetch on setup — data only ever arrives via webhook push,
         # so there is no "first refresh" to wait on the way Garmin/Strava do.
     else:
-        await coordinator.async_config_entry_first_refresh()
+        # NOT await coordinator.async_config_entry_first_refresh(): that
+        # blocks this whole function — and therefore every later config
+        # entry's setup, and HA's overall startup — on one live network
+        # round-trip to Garmin/Coros/Strava's API, every single restart, not
+        # just first-ever setup (a real, user-reported startup-speed
+        # complaint; observed taking 1-9s per source in testing, and far
+        # longer during a rate-limit backoff). Entities are created with
+        # coordinator.data still None — every sensor already handles that
+        # (see sensor.py's WorkoutSensor.native_value and
+        # CumulativeActivitySensor._handle_coordinator_update), showing
+        # "unavailable" via CoordinatorEntity's own last_update_success
+        # check until this background refresh completes, rather than
+        # inventing a different kind of missing-data state. The real
+        # tradeoff: a genuinely bad credential/expired token no longer
+        # raises ConfigEntryNotReady (a distinct "awaiting retry" status in
+        # Settings > Devices & Services) — it surfaces the same way any
+        # LATER auth failure already does, as entities sitting unavailable
+        # plus a logged error, which is what a user already has to check
+        # today if their credentials expire after initial setup.
+        hass.async_create_task(coordinator.async_refresh())
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
