@@ -1,4 +1,4 @@
 homeassistant>=2024.6.0
-ruff
+ruff==0.16.3
 pytest
 pytest-homeassistant-custom-component

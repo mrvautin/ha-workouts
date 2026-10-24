@@ -76,7 +76,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import defaultdict
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 from homeassistant.components.recorder import get_instance
 from homeassistant.components.recorder.models import (
@@ -527,8 +527,8 @@ async def _range_fully_covered(
     def _query() -> bool:
         rows = statistics_during_period(
             hass,
-            datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc),
-            datetime.combine(end_day, datetime.max.time(), tzinfo=timezone.utc),
+            datetime.combine(start_day, datetime.min.time(), tzinfo=UTC),
+            datetime.combine(end_day, datetime.max.time(), tzinfo=UTC),
             statistic_ids,
             "day",
             None,
@@ -697,7 +697,7 @@ async def _rewrite_metric_series_locked(
     while day <= end_day:
         running += _sum_metric(day_buckets.get(day, []), metric)
         # Local noon avoids DST-boundary ambiguity when the recorder truncates to the hour.
-        bucket_start = datetime.combine(day, datetime.min.time(), tzinfo=timezone.utc).replace(
+        bucket_start = datetime.combine(day, datetime.min.time(), tzinfo=UTC).replace(
             hour=12
         )
         statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
@@ -709,7 +709,7 @@ async def _rewrite_metric_series_locked(
         tail_day_contribution = max(tail_by_day[tail_day] - prior_day_total, 0.0)
         running += tail_day_contribution
         bucket_start = datetime.combine(
-            tail_day, datetime.min.time(), tzinfo=timezone.utc
+            tail_day, datetime.min.time(), tzinfo=UTC
         ).replace(hour=12)
         statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
         prior_tail_total = tail_by_day[tail_day]
@@ -883,7 +883,7 @@ async def async_apply_activity_deltas(
             # here so the whole [earliest_day, today] tail stays correct.
             running += _sum_metric(activities_by_day.get(day, []), metric)
             bucket_start = datetime.combine(
-                day, datetime.min.time(), tzinfo=timezone.utc
+                day, datetime.min.time(), tzinfo=UTC
             ).replace(hour=12)
             statistic_data.append(StatisticData(start=bucket_start, sum=running, state=running))
             day += timedelta(days=1)

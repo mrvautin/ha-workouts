@@ -12,7 +12,7 @@ days show distance/duration but no calories.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import aiohttp
@@ -73,8 +73,8 @@ class StravaSource(WorkoutSource):
         await self._request("GET", "/athlete")
 
     async def async_fetch(self, target_day: date) -> WorkoutData:
-        start = datetime.combine(target_day, datetime.min.time(), tzinfo=timezone.utc)
-        end = datetime.combine(target_day, datetime.max.time(), tzinfo=timezone.utc)
+        start = datetime.combine(target_day, datetime.min.time(), tzinfo=UTC)
+        end = datetime.combine(target_day, datetime.max.time(), tzinfo=UTC)
         summaries = await self._list_activities(start, end)
 
         activities = []
@@ -88,8 +88,8 @@ class StravaSource(WorkoutSource):
         self, start_day: date, end_day: date
     ) -> list[Activity]:
         """Fetch all activities in the range. No calorie detail calls (see module docstring)."""
-        start = datetime.combine(start_day, datetime.min.time(), tzinfo=timezone.utc)
-        end = datetime.combine(end_day, datetime.max.time(), tzinfo=timezone.utc)
+        start = datetime.combine(start_day, datetime.min.time(), tzinfo=UTC)
+        end = datetime.combine(end_day, datetime.max.time(), tzinfo=UTC)
         summaries = await self._list_activities(start, end)
         return [self._parse_activity(summary, calories=None) for summary in summaries]
 

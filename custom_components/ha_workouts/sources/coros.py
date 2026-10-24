@@ -43,7 +43,7 @@ import json
 import logging
 from collections import deque
 from collections.abc import Callable
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import aiohttp
@@ -460,7 +460,7 @@ class CorosSource(WorkoutSource):
             )
             self.mcp_debug_log.append(
                 {
-                    "time": datetime.now(tz=timezone.utc).isoformat(),
+                    "time": datetime.now(tz=UTC).isoformat(),
                     "tool": tool_name,
                     "error": str(err),
                 }
@@ -468,7 +468,7 @@ class CorosSource(WorkoutSource):
             return None
         self.mcp_debug_log.append(
             {
-                "time": datetime.now(tz=timezone.utc).isoformat(),
+                "time": datetime.now(tz=UTC).isoformat(),
                 "tool": tool_name,
                 "text": text,
             }
@@ -582,8 +582,8 @@ def _parse_coros_timestamp(value: int | None) -> datetime:
     up under yesterday's date).
     """
     if not value:
-        return datetime.min.replace(tzinfo=timezone.utc)
-    return dt_util.as_local(datetime.fromtimestamp(value, tz=timezone.utc))
+        return datetime.min.replace(tzinfo=UTC)
+    return dt_util.as_local(datetime.fromtimestamp(value, tz=UTC))
 
 
 def _parse_dashboard_hrv(
