@@ -143,6 +143,17 @@ def _parse_splits_from_fit(fit_zip_bytes: bytes) -> list[ActivitySplit]:
     activity in testing) despite being a documented lap field, so pace is
     always derived here from distance/time instead of trusted from the
     file directly.
+
+    Cadence: FIT's lap-level field is sport-specific — avg_running_cadence
+    for running (in STRIDES/min; doubled here to match steps/min, the same
+    convention Activity.avg_running_cadence_spm already uses — confirmed
+    empirically: a lap's avg_running_cadence x2 lines up with the
+    activity's own JSON-reported average), avg_cadence for cycling (in
+    RPM already, no conversion needed). Read from each lap message's own
+    `sport` field rather than threading ActivityType through the whole
+    call chain from async_fetch_splits — a multi-sport FIT file could in
+    principle vary per lap, though that's not a case this integration
+    otherwise handles specially.
     """
     try:
         with zipfile.ZipFile(io.BytesIO(fit_zip_bytes)) as zf:
@@ -171,6 +182,15 @@ def _parse_splits_from_fit(fit_zip_bytes: bytes) -> list[ActivitySplit]:
 
                 pace_seconds_per_km = (duration / (distance / 1000)) if distance else None
 
+                sport = _fit_field(frame, "sport")
+                if sport == "running":
+                    running_cadence = _fit_field(frame, "avg_running_cadence")
+                    cadence = running_cadence * 2 if running_cadence is not None else None
+                elif sport == "cycling":
+                    cadence = _fit_field(frame, "avg_cadence")
+                else:
+                    cadence = None
+
                 splits.append(
                     ActivitySplit(
                         index=len(splits) + 1,
@@ -183,6 +203,10 @@ def _parse_splits_from_fit(fit_zip_bytes: bytes) -> list[ActivitySplit]:
                         avg_heart_rate=_fit_field(frame, "avg_heart_rate"),
                         max_heart_rate=_fit_field(frame, "max_heart_rate"),
                         elevation_gain_meters=_fit_field(frame, "total_ascent"),
+                        stopped_seconds=max(elapsed - duration, 0.0),
+                        avg_power_watts=_fit_field(frame, "avg_power"),
+                        avg_cadence=cadence,
+                        avg_ground_contact_time_ms=_fit_field(frame, "avg_stance_time"),
                     )
                 )
     except fitdecode.FitError:

@@ -40,6 +40,22 @@ class ActivitySplit:
     avg_heart_rate: int | None = None
     max_heart_rate: int | None = None
     elevation_gain_meters: float | None = None
+    #: How long of this split's elapsed_seconds was NOT spent moving (e.g.
+    #: waiting at a traffic light) — elapsed_seconds minus duration_seconds
+    #: (moving time), kept as its own field rather than making callers
+    #: re-derive it. 0.0, not None, when the source has both figures and
+    #: they're equal (genuinely no stopped time), matching
+    #: elapsed_seconds/duration_seconds's own non-Optional-ness.
+    stopped_seconds: float = 0.0
+    avg_power_watts: float | None = None
+    #: Running/cycling cadence, normalized to steps-per-minute for running
+    #: (matching Activity.avg_running_cadence_spm's convention) — FIT's own
+    #: lap-level field is strides/min for running (1 stride = 2 steps,
+    #: confirmed against a real activity's whole-activity average), so
+    #: _parse_splits_from_fit doubles it before storing here rather than
+    #: storing the raw FIT unit and leaving every caller to know that.
+    avg_cadence: float | None = None
+    avg_ground_contact_time_ms: float | None = None
 
 
 @dataclass(slots=True)

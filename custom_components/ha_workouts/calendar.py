@@ -77,6 +77,20 @@ def _build_description(activity: Activity) -> str:
     if activity.distance_meters:
         lines.append(f"Distance: {activity.distance_meters / 1000:.2f} km")
     lines.append(f"Duration: {_format_duration(activity.duration_seconds)}")
+    # Moving vs elapsed only differ when at least one split actually
+    # recorded stopped time (e.g. waiting at a light) — splits are the only
+    # place this integration has elapsed time at all; Activity itself only
+    # ever carries moving/timer duration (see models.py), so there's
+    # nothing to show here when there's no split detail to derive it from.
+    if activity.splits:
+        total_elapsed = activity.splits[-1].cumulative_elapsed_seconds
+        total_stopped = total_elapsed - activity.duration_seconds
+        if total_stopped > 1:
+            lines.append(
+                f"Moving time: {_format_duration(activity.duration_seconds)} "
+                f"(+{_format_duration(total_stopped)} stopped, "
+                f"{_format_duration(total_elapsed)} elapsed)"
+            )
     if activity.distance_meters and activity.duration_seconds:
         avg_pace = _format_pace(activity.duration_seconds / (activity.distance_meters / 1000))
         if avg_pace:
@@ -84,7 +98,10 @@ def _build_description(activity: Activity) -> str:
     if activity.calories:
         lines.append(f"Calories: {activity.calories:.0f}")
     if activity.avg_heart_rate:
-        lines.append(f"Average heart rate: {activity.avg_heart_rate:.0f} bpm")
+        hr_part = f"Average heart rate: {activity.avg_heart_rate:.0f} bpm"
+        if activity.max_heart_rate:
+            hr_part += f" (max {activity.max_heart_rate:.0f})"
+        lines.append(hr_part)
     if activity.elevation_gain_meters:
         lines.append(f"Elevation gain: {activity.elevation_gain_meters:.0f} m")
 
@@ -106,8 +123,28 @@ def _build_description(activity: Activity) -> str:
 def _format_split_line(split: ActivitySplit) -> str:
     pace = _format_pace(split.avg_pace_seconds_per_km)
     pace_part = f", {pace}" if pace else ""
+    # Partial final split (e.g. a 14.23 km run's last entry is 0.23 km, not
+    # a full km) — flagged so it doesn't read as a genuinely slow/fast km.
+    is_partial = split.distance_meters < 950
+    label = f"km {split.index}" + (f" ({split.distance_meters / 1000:.2f} km)" if is_partial else "")
+
+    detail_parts: list[str] = []
+    if split.avg_heart_rate:
+        detail_parts.append(f"{split.avg_heart_rate:.0f} bpm")
+    if split.elevation_gain_meters:
+        detail_parts.append(f"+{split.elevation_gain_meters:.0f} m")
+    if split.avg_power_watts:
+        detail_parts.append(f"{split.avg_power_watts:.0f} W")
+    if split.avg_cadence:
+        detail_parts.append(f"{split.avg_cadence:.0f} spm")
+    if split.avg_ground_contact_time_ms:
+        detail_parts.append(f"{split.avg_ground_contact_time_ms:.0f} ms GCT")
+    detail = f" · {' · '.join(detail_parts)}" if detail_parts else ""
+
+    stopped = f" (+{_format_duration(split.stopped_seconds)} stopped)" if split.stopped_seconds > 1 else ""
+
     return (
-        f"  km {split.index}: {_format_duration(split.elapsed_seconds)}{pace_part} "
+        f"  {label}: {_format_duration(split.elapsed_seconds)}{pace_part}{detail}{stopped} "
         f"(at {_format_duration(split.cumulative_elapsed_seconds)})"
     )
 
