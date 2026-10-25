@@ -29,10 +29,19 @@ calls against a real account:
 - Daily summary, HRV (with status classification), sleep (with stage
   breakdown), body battery, fitness age, heart rate zones: all present,
   often richer than the old garminconnect library exposed.
-- Per-km/mile splits: present, but on GET /activity-service/activity/{id}
-  (ActivitySummaryDTO.splitSummaries), NOT the .../workouts endpoint (which
-  only returns a structured *planned* workout's steps/targets, never actual
-  recorded performance).
+- Per-km/mile splits: NOT present in ActivitySummaryDTO.splitSummaries,
+  despite that field's splitType enum formally including MARKER_KILOMETER/
+  MARKER_MILE — confirmed by direct testing that Garmin's API never
+  actually populates those values for real activities (checked 11 real
+  running activities, each with 6-16 genuine on-device laps per their own
+  lapCount field, zero MARKER_KILOMETER entries returned by any of them;
+  splitSummaries only ever contained whole-activity-level buckets like
+  INTERVAL_ACTIVE/RWD_RUN/RWD_WALK). The real per-lap data only exists in
+  the original recorded .FIT file, downloadable via
+  GET /download-service/files/activity/{id} (a zipped .fit) — see
+  _parse_splits_from_fit below, which parses that file's `lap` messages
+  directly (via the fitdecode library) rather than trying to get this from
+  any JSON endpoint.
 - VO2max and Training Readiness (score/level/feedback): BOTH genuinely
   absent, despite Garmin Connect's own app clearly showing current values
   for both via its "Training Status" widget. The spec's one VO2max-shaped
@@ -52,11 +61,14 @@ calls against a real account:
 from __future__ import annotations
 
 import asyncio
+import io
 import logging
+import zipfile
 from datetime import date, datetime
 from typing import Any
 
 import aiohttp
+import fitdecode
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
@@ -112,52 +124,82 @@ def _parse_hrv(raw: dict[str, Any] | None) -> tuple[float | None, float | None, 
     )
 
 
-def _parse_splits(raw: dict[str, Any] | None) -> list[ActivitySplit]:
-    """Parse GET /activity-service/activity/{id}'s splitSummaries into
-    per-km/mile ActivitySplit records.
+def _parse_splits_from_fit(fit_zip_bytes: bytes) -> list[ActivitySplit]:
+    """Parse per-km/mile auto-lap splits out of a downloaded .FIT file's
+    `lap` messages — see module docstring for why this, rather than any
+    JSON endpoint, is the only place this data actually exists.
 
-    Only "real" auto-laps are kept — Garmin's splitType enum covers many
-    non-distance split kinds (e.g. RWD_STAND/RWD_WALK rest-wristband
-    detection, MARKER_KILOMETER/MARKER_MILE distance markers, interval
-    phases); INTERVAL_ACTIVE is the plain auto-lap type matching what the
-    old garminconnect-based parser treated as "real" laps (intensityType ==
-    "INTERVAL" there).
+    fit_zip_bytes is the raw response body of GET
+    /download-service/files/activity/{id} — a zip archive. Confirmed by
+    direct testing that a single-activity download always contains exactly
+    one .fit entry (observed name: "{activityId}_ACTIVITY.fit"), but the
+    exact filename isn't documented anywhere, so this matches by extension
+    rather than assuming a name.
+
+    Every field read from a lap message is optional per the FIT spec
+    itself (sparse/extensible by design) — a device without a barometric
+    altimeter, for instance, simply omits total_ascent. avg_speed is
+    notably NOT reliably present (confirmed absent on a real device/
+    activity in testing) despite being a documented lap field, so pace is
+    always derived here from distance/time instead of trusted from the
+    file directly.
     """
-    if not raw:
+    try:
+        with zipfile.ZipFile(io.BytesIO(fit_zip_bytes)) as zf:
+            fit_names = [n for n in zf.namelist() if n.lower().endswith(".fit")]
+            if not fit_names:
+                return []
+            fit_bytes = zf.read(fit_names[0])
+    except zipfile.BadZipFile:
         return []
-    split_dtos = [
-        split
-        for split in (raw.get("splitSummaries") or [])
-        if split.get("splitType") == "INTERVAL_ACTIVE"
-    ]
 
     splits: list[ActivitySplit] = []
     cumulative_distance = 0.0
     cumulative_elapsed = 0.0
-    for index, split in enumerate(split_dtos, start=1):
-        distance = split.get("distance") or 0.0
-        elapsed = split.get("elapsedDuration") or split.get("duration") or 0.0
-        cumulative_distance += distance
-        cumulative_elapsed += elapsed
+    try:
+        with fitdecode.FitReader(io.BytesIO(fit_bytes)) as fit:
+            for frame in fit:
+                if not (
+                    isinstance(frame, fitdecode.FitDataMessage) and frame.name == "lap"
+                ):
+                    continue
+                distance = _fit_field(frame, "total_distance") or 0.0
+                duration = _fit_field(frame, "total_timer_time") or 0.0
+                elapsed = _fit_field(frame, "total_elapsed_time") or duration
+                cumulative_distance += distance
+                cumulative_elapsed += elapsed
 
-        avg_speed = split.get("averageSpeed")  # metres/second
-        pace_seconds_per_km = (1000 / avg_speed) if avg_speed else None
+                pace_seconds_per_km = (duration / (distance / 1000)) if distance else None
 
-        splits.append(
-            ActivitySplit(
-                index=index,
-                distance_meters=distance,
-                duration_seconds=split.get("duration") or 0.0,
-                elapsed_seconds=elapsed,
-                cumulative_distance_meters=cumulative_distance,
-                cumulative_elapsed_seconds=cumulative_elapsed,
-                avg_pace_seconds_per_km=pace_seconds_per_km,
-                avg_heart_rate=split.get("averageHR"),
-                max_heart_rate=split.get("maxHR"),
-                elevation_gain_meters=split.get("elevationGain"),
-            )
-        )
+                splits.append(
+                    ActivitySplit(
+                        index=len(splits) + 1,
+                        distance_meters=distance,
+                        duration_seconds=duration,
+                        elapsed_seconds=elapsed,
+                        cumulative_distance_meters=cumulative_distance,
+                        cumulative_elapsed_seconds=cumulative_elapsed,
+                        avg_pace_seconds_per_km=pace_seconds_per_km,
+                        avg_heart_rate=_fit_field(frame, "avg_heart_rate"),
+                        max_heart_rate=_fit_field(frame, "max_heart_rate"),
+                        elevation_gain_meters=_fit_field(frame, "total_ascent"),
+                    )
+                )
+    except fitdecode.FitError:
+        # A malformed/unexpected FIT file (e.g. a chained multi-session
+        # file fitdecode can't fully walk) degrades to "no splits for this
+        # activity" rather than failing the whole fetch — see
+        # async_fetch_splits's caller in async_fetch, which already treats
+        # splits as supplementary, non-critical per-activity detail.
+        return []
     return splits
+
+
+def _fit_field(frame: Any, field_name: str) -> Any:
+    try:
+        return frame.get_value(field_name)
+    except KeyError:
+        return None
 
 
 def _parse_garmin_datetime(value: str | None) -> datetime:
@@ -282,6 +324,42 @@ class GarminSource(WorkoutSource):
                 ) from err
         raise WorkoutSourceError("Garmin Personal API request failed after token refresh")
 
+    async def _download_fit(self, activity_id: str) -> bytes | None:
+        """Download one activity's original recorded file (a zipped .FIT —
+        see _parse_splits_from_fit) — same auth/retry shape as _request,
+        but the response body is binary, not JSON, so it can't share that
+        method directly.
+        """
+        await self._async_ensure_authenticated()
+        assert self._access_token is not None
+
+        for attempt in range(2):
+            try:
+                async with self._client().get(
+                    f"{_BASE_URL}/download-service/files/activity/{activity_id}",
+                    headers={"Authorization": f"Bearer {self._access_token}"},
+                ) as resp:
+                    if resp.status == 401 and attempt == 0:
+                        self._access_token = None
+                        await self._async_exchange_token()
+                        continue
+                    if resp.status == 401:
+                        raise WorkoutSourceAuthError(
+                            "Garmin Personal API rejected the request even after refreshing "
+                            "the token — the underlying API key has likely expired."
+                        )
+                    if resp.status == 404:
+                        return None
+                    if resp.status == 429:
+                        raise WorkoutSourceRateLimitedError("Garmin Personal API rate limited us")
+                    resp.raise_for_status()
+                    return await resp.read()
+            except aiohttp.ClientError as err:
+                raise WorkoutSourceError(
+                    f"Error communicating with Garmin Personal API: {err}"
+                ) from err
+        raise WorkoutSourceError("Garmin Personal API request failed after token refresh")
+
     async def async_fetch(self, target_day: date) -> WorkoutData:
         day_str = target_day.isoformat()
 
@@ -314,13 +392,16 @@ class GarminSource(WorkoutSource):
 
         Used both for today's newly-seen activities (see async_fetch above)
         and by the opt-in historical splits backfill job (see
-        statistics_import.async_backfill_activity_splits). Splits live on
-        the single-activity detail endpoint's splitSummaries field, NOT the
-        .../workouts endpoint (confirmed via Garmin's own OpenAPI spec — see
-        module docstring).
+        statistics_import.async_backfill_activity_splits). Downloads and
+        parses the activity's original .FIT file — see module docstring and
+        _parse_splits_from_fit for why no JSON endpoint actually has this
+        data, despite Garmin's own OpenAPI spec formally documenting a
+        splitType value that looks like it should.
         """
-        raw_activity = await self._request(f"/activity-service/activity/{source_id}")
-        return _parse_splits(raw_activity if isinstance(raw_activity, dict) else None)
+        fit_zip_bytes = await self._download_fit(source_id)
+        if fit_zip_bytes is None:
+            return []
+        return _parse_splits_from_fit(fit_zip_bytes)
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date
