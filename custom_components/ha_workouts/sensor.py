@@ -720,8 +720,26 @@ async def async_setup_entry(
         # exposed via coordinator.backfill_progress / the status sensor above.
         # Gap-aware: only fetches days not already covered, so this is cheap to
         # re-run after options change.
+        #
+        # entry.async_create_background_task, NOT hass.async_create_task: a
+        # plain hass-level task is still tracked and AWAITED (with a
+        # timeout) by HA's own startup bootstrap — confirmed as a real,
+        # user-hit bug in production: a slow/large first-ever backfill hit
+        # that bootstrap timeout, logged "Something is blocking Home
+        # Assistant from wrapping up the start up phase... continue
+        # anyway", and HA proceeding anyway while this task was still
+        # running triggered a SECOND entity-platform setup pass, which then
+        # logged "does not generate unique IDs... ignoring sensor.garmin_
+        # yoga_monthtd" (and 54 others) — every duplicate entity from that
+        # second pass silently dropped. A background task is explicitly
+        # exempt from bootstrap's wait (see its own docstring: "Will not
+        # block startup"), which is the correct semantic for a job that can
+        # legitimately take minutes to hours, and ties its lifetime to this
+        # config entry (auto-cancelled on unload/reload, not just HA
+        # shutdown) rather than being a bare hass-level task.
         backfill_days = entry.options.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS)
-        backfill_task = hass.async_create_task(
+        backfill_task = entry.async_create_background_task(
+            hass,
             async_backfill_activity_statistics(
                 hass,
                 entry_slug,
@@ -729,7 +747,8 @@ async def async_setup_entry(
                 backfill_days,
                 coordinator.backfill_progress,
                 coordinator.request_lock,
-            )
+            ),
+            name=f"ha_workouts_{entry_slug}_statistics_backfill",
         )
         # The per-activity-type sensors are cumulative-total entities that seed
         # their starting value from the backfill's imported statistics on first
@@ -774,8 +793,15 @@ async def async_setup_entry(
             # its own, separately-paced task, and doesn't gate sensor
             # creation on anything — see activity_log.async_backfill_activity_splits).
             # Shares the same backfill_days depth computed above rather than
-            # having its own separate setting.
-            hass.async_create_task(_splits_backfill_with_migration())
+            # having its own separate setting. Background task, not a plain
+            # hass-level one — see the statistics backfill's own comment
+            # above for why (HA bootstrap otherwise waits on and can time
+            # out on this, triggering duplicate entity setup).
+            entry.async_create_background_task(
+                hass,
+                _splits_backfill_with_migration(),
+                name=f"ha_workouts_{entry_slug}_splits_backfill",
+            )
         if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
             # One-time (per source, until a full wipe) history scan feeding
             # the PersonalBestSensor entities created above — see
@@ -785,15 +811,18 @@ async def async_setup_entry(
             # activities entirely once statistics are already covered,
             # which would otherwise leave personal bests permanently stuck
             # on an account that already had its statistics imported before
-            # this feature existed).
-            hass.async_create_task(
+            # this feature existed). Background task — see the statistics
+            # backfill's own comment above for why.
+            entry.async_create_background_task(
+                hass,
                 async_backfill_personal_bests(
                     hass,
                     entry_slug,
                     coordinator.source,
                     backfill_days,
                     coordinator.request_lock,
-                )
+                ),
+                name=f"ha_workouts_{entry_slug}_personal_bests_backfill",
             )
 
 

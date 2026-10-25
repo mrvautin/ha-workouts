@@ -136,7 +136,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         # LATER auth failure already does, as entities sitting unavailable
         # plus a logged error, which is what a user already has to check
         # today if their credentials expire after initial setup.
-        hass.async_create_task(coordinator.async_refresh())
+        #
+        # entry.async_create_background_task, NOT hass.async_create_task:
+        # a plain hass-level task is still tracked and awaited (with a
+        # timeout) by HA's own startup bootstrap, which defeats the point
+        # of backgrounding this in the first place during e.g. a rate-limit
+        # backoff — see sensor.py's backfill task creation for the same
+        # fix applied to a case that was confirmed, in production, to
+        # actually hit that timeout and cause duplicate entity setup.
+        entry.async_create_background_task(
+            hass, coordinator.async_refresh(), name=f"ha_workouts_{source.key}_first_refresh"
+        )
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = coordinator
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
