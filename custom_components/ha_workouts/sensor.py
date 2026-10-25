@@ -23,7 +23,10 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .activity_log import async_backfill_activity_splits
+from .activity_log import (
+    async_backfill_activity_splits,
+    async_reset_single_whole_activity_splits,
+)
 from .backfill_progress import BackfillProgress
 from .const import (
     CONF_BACKFILL_DAYS,
@@ -737,13 +740,28 @@ async def async_setup_entry(
         backfill_task.add_done_callback(_add_activity_type_sensors)
 
         if source_type == SOURCE_GARMIN:
-            # Independent of the activity/statistics backfill above (runs as
-            # its own, separately-paced task, and doesn't gate sensor
-            # creation on anything — see activity_log.async_backfill_activity_splits).
-            # Shares the same backfill_days depth computed above rather than
-            # having its own separate setting.
-            hass.async_create_task(
-                async_backfill_activity_splits(
+
+            async def _splits_backfill_with_migration() -> None:
+                # One-time, self-limiting migration: reset any activity
+                # still carrying the old single-whole-activity-split bug's
+                # signature back to splits=None, so the backfill below
+                # naturally re-fetches real per-km data for it. Idempotent
+                # without needing its own "has run" flag (unlike
+                # personal_bests.py's scan) — once an activity is reset, its
+                # new real splits will never again match the single-split/
+                # full-distance signature, so a later run is just a cheap
+                # no-op scan over already-correct data.
+                reset_count = await async_reset_single_whole_activity_splits(
+                    hass, entry_slug
+                )
+                if reset_count:
+                    _LOGGER.info(
+                        "Reset %d %s activities with stale single-split data "
+                        "for re-backfill (see sources/garmin.py's FIT-splits fix)",
+                        reset_count,
+                        entry_slug,
+                    )
+                await async_backfill_activity_splits(
                     hass,
                     entry_slug,
                     coordinator.source,
@@ -751,7 +769,13 @@ async def async_setup_entry(
                     coordinator.splits_backfill_progress,
                     coordinator.request_lock,
                 )
-            )
+
+            # Independent of the activity/statistics backfill above (runs as
+            # its own, separately-paced task, and doesn't gate sensor
+            # creation on anything — see activity_log.async_backfill_activity_splits).
+            # Shares the same backfill_days depth computed above rather than
+            # having its own separate setting.
+            hass.async_create_task(_splits_backfill_with_migration())
         if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
             # One-time (per source, until a full wipe) history scan feeding
             # the PersonalBestSensor entities created above — see

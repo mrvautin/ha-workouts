@@ -88,6 +88,48 @@ async def async_save_activities(
     await _store(hass, entry_slug).async_save([_activity_to_dict(a) for a in activities.values()])
 
 
+async def async_reset_single_whole_activity_splits(hass: HomeAssistant, entry_slug: str) -> int:
+    """One-time migration: reset any activity whose stored splits are the
+    unmistakable signature of a real, now-fixed parsing bug back to None, so
+    the existing splits backfill job (async_backfill_activity_splits, which
+    only re-fetches activities with splits is None) naturally re-fetches
+    real per-km data for them.
+
+    The bug (sources/garmin.py, fixed alongside this migration): Garmin's
+    JSON activity-detail endpoint's splitSummaries field formally supports
+    per-km markers (splitType MARKER_KILOMETER) but — confirmed by testing
+    against 11+ real activities — never actually returns them; the old
+    parser instead kept a DIFFERENT splitType (INTERVAL_ACTIVE) that turned
+    out to be a single whole-activity-duration summary bucket, not a real
+    lap. Every activity synced before the fix (which downloads and parses
+    the original .FIT file instead) ended up with exactly one "split"
+    covering its entire distance — that specific shape (len(splits) == 1
+    AND that split's distance within 1 metre of the activity's own total
+    distance) is the unambiguous signature of this bug, distinct from a
+    genuinely short activity that might legitimately have just one real
+    km-split (which wouldn't coincidentally match the activity's FULL
+    distance to within a metre — a real single first-km split of a longer
+    run is shorter than the activity's total distance).
+
+    Returns the number of activities reset, for a one-line log message at
+    the call site.
+    """
+    activities = await async_load_activities(hass, entry_slug)
+    reset_count = 0
+    for activity in activities.values():
+        if (
+            activity.splits is not None
+            and len(activity.splits) == 1
+            and activity.distance_meters is not None
+            and abs(activity.splits[0].distance_meters - activity.distance_meters) < 1.0
+        ):
+            activity.splits = None
+            reset_count += 1
+    if reset_count:
+        await async_save_activities(hass, entry_slug, activities)
+    return reset_count
+
+
 async def async_wipe_activity_log(hass: HomeAssistant, entry_slug: str) -> None:
     """Permanently delete the persisted activity log for entry_slug.
 
@@ -189,13 +231,22 @@ async def async_backfill_activity_splits(
         for i, activity in enumerate(pending):
             async with request_lock:
                 activity.splits = await source.async_fetch_splits(activity.source_id)
-            activities[activity.source_id] = activity
-            # Save incrementally (not just once at the end) so a HA restart
-            # mid-job doesn't lose already-fetched splits — the next run's
-            # `pending` query naturally picks up wherever this one left off,
-            # since it re-derives "still missing splits" from stored state
-            # rather than tracking its own separate progress cursor.
-            await async_save_activities(hass, entry_slug, activities)
+            # async_record_activities, NOT a hand-rolled save of the
+            # `activities` dict loaded once at the top of this function —
+            # this job can run for hours (one request per activity,
+            # SPLITS_BACKFILL_PAUSE_SECONDS apart), so that dict is a
+            # long-stale snapshot by the time later iterations save. Writing
+            # it back wholesale on every iteration was a real, confirmed
+            # bug: it silently clobbered fresher data the live coordinator
+            # poll wrote for the SAME activity after this job's snapshot was
+            # taken (e.g. corrected splits from a bug fix deployed mid-run)
+            # right back to the stale pre-snapshot value, repeatedly, for
+            # the rest of the job. async_record_activities re-loads the
+            # CURRENT on-disk state immediately before merging and saving
+            # just this one activity, so a concurrent fresher write always
+            # wins rather than being silently overwritten — see its own
+            # docstring, which already documents this exact guarantee.
+            await async_record_activities(hass, entry_slug, [activity])
 
             progress.days_imported_this_run = i + 1
             progress.oldest_day_imported = activity.start.date()
