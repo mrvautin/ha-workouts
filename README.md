@@ -1,16 +1,23 @@
 # HA Workouts
 
-A Home Assistant custom integration (HACS) that pulls workout and daily health
-data from Garmin, Coros, Strava, and/or Apple Health and exposes it as
-sensors, with long-term statistics for charting aggregated activity over
-time — monthly running distance, year-to-date totals, year-over-year
-comparisons, and so on.
+Bring your running, cycling, and other workout data from **Garmin, Coros,
+Strava, and Apple Health** into **Home Assistant** as native sensors — steps,
+heart rate, HRV, sleep, recovery, training load, VO2max/personal bests (where
+available), and long-term statistics for charting aggregated activity over
+time (monthly running distance, year-to-date totals, year-over-year
+comparisons). Each run or ride also shows up as a calendar event with a full
+per-km split breakdown (pace, heart rate, power, cadence, elevation per km),
+and every sensor this integration creates can be exposed to an AI
+assistant/MCP client via Home Assistant's own Model Context Protocol Server
+integration — see [Letting an AI assistant query your
+data](#letting-an-ai-assistant-query-your-data-mcp) below.
 
-You can add Garmin, Coros, Strava, Apple Health, or any combination — each is
-a separate config entry with its own source-prefixed sensors
-(`sensor.garmin_*`, `sensor.coros_*`, `sensor.strava_*`,
-`sensor.apple_health_*`), so data from each source can be charted separately
-or side by side.
+A free, open-source Home Assistant custom integration, installed via
+[HACS](https://hacs.xyz/). You can add Garmin, Coros, Strava, Apple Health, or
+any combination — each is a separate config entry with its own
+source-prefixed sensors (`sensor.garmin_*`, `sensor.coros_*`,
+`sensor.strava_*`, `sensor.apple_health_*`), so data from each source can be
+charted separately or side by side.
 
 ## Supported sources
 

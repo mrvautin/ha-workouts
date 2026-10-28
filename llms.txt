@@ -1,0 +1,51 @@
+# HA Workouts
+
+> A free, open-source Home Assistant custom integration (installed via HACS)
+> that pulls workout and daily health data from Garmin, Coros, Strava, and
+> Apple Health into Home Assistant as native sensors, long-term statistics,
+> and calendar events with per-km split detail.
+
+HA Workouts is for Home Assistant users who want their running, cycling, and
+other workout data — and related health metrics like heart rate, HRV, sleep,
+recovery, and training load — available as sensors inside Home Assistant,
+alongside the rest of their smart home data. It is not a fitness app itself;
+it is an integration that connects existing fitness-tracking accounts
+(Garmin Connect, Coros, Strava, Apple Health) to Home Assistant.
+
+## What it does
+
+- Imports activities (runs, rides, swims, walks, hikes, strength training,
+  yoga) from Garmin, Coros, Strava, and Apple Health as Home Assistant
+  sensors and long-term statistics (for Statistics Graph / Statistics cards:
+  monthly totals, year-to-date, year-over-year comparisons).
+- Imports historical activity data in the background on setup (configurable
+  depth, from 90 days up to full history).
+- Creates one calendar entity per activity type (e.g. "Running activities"),
+  each event showing distance, duration, pace, heart rate, and — for Garmin —
+  a full per-km split breakdown (pace, heart rate, power, cadence, ground
+  contact time, elevation per km).
+- Exposes daily health metrics where the source provides them: steps,
+  resting heart rate, HRV, sleep score, recovery, training load, body
+  battery, stress.
+- Tracks all-time personal bests (fastest 1K/5K/10K/half marathon/marathon
+  split ever recorded) for Garmin.
+- Works with Home Assistant's built-in Model Context Protocol (MCP) Server
+  integration, so any of its sensors can be exposed to an MCP-capable AI
+  assistant (e.g. Claude) for natural-language queries about a user's
+  training history.
+
+## Who this is for
+
+Home Assistant users who already have a Garmin, Coros, Strava, or Apple
+Watch/Health setup and want that data visible and chartable inside their
+existing Home Assistant dashboards, rather than only inside each fitness
+platform's own app.
+
+## Key links
+
+- Repository: https://github.com/mrvautin/ha-workouts
+- Full documentation (setup instructions per source, data exposed, charting
+  examples, troubleshooting): https://github.com/mrvautin/ha-workouts/blob/main/README.md
+- Installation: via HACS (Home Assistant Community Store) as a custom
+  repository — see the README's Installation section.
+- License: MIT
