@@ -8,5 +8,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/mrvautin/ha-workouts/issues",
   "requirements": ["fitdecode==0.11.0"],
-  "version": "0.14.0"
+  "version": "0.15.0"
 }

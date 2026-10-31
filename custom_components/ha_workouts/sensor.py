@@ -39,6 +39,7 @@ from .const import (
     SOURCE_APPLE_HEALTH,
     SOURCE_COROS,
     SOURCE_GARMIN,
+    SOURCE_OURA,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
 from .models import Activity, ActivityType, WorkoutData
@@ -271,6 +272,112 @@ COROS_MCP_SENSORS: tuple[WorkoutSensorDescription, ...] = (
     # ever happens, just re-add the sensor descriptions here).
 )
 
+#: Oura's own daily scores and sleep detail (see sources/oura.py and
+#: SOURCES_WITH_OURA below) — kept as its own set, not folded into
+#: DAILY_SUMMARY_SENSORS/HRV_SENSORS above, since Oura has no
+#: floors_climbed/stress_avg/body_battery_*/hrv_status equivalents (those
+#: would sit permanently unavailable) but does have its own readiness/
+#: activity scores and sleep-stage breakdown neither of those sets covers.
+OURA_SENSORS: tuple[WorkoutSensorDescription, ...] = (
+    WorkoutSensorDescription(
+        key="readiness_score",
+        translation_key="readiness_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.readiness_score if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="sleep_score",
+        translation_key="sleep_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.daily_summary.sleep_score if data.daily_summary else None,
+    ),
+    WorkoutSensorDescription(
+        key="activity_score",
+        translation_key="activity_score",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.activity_score if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="steps",
+        translation_key="steps",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: data.daily_summary.steps if data.daily_summary else None,
+    ),
+    WorkoutSensorDescription(
+        key="active_calories",
+        translation_key="active_calories",
+        native_unit_of_measurement="kcal",
+        state_class=SensorStateClass.TOTAL_INCREASING,
+        value_fn=lambda data: (
+            data.daily_summary.active_calories if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="sleep_duration",
+        translation_key="sleep_duration",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            round(data.daily_summary.sleep_seconds / 60, 1)
+            if data.daily_summary and data.daily_summary.sleep_seconds is not None
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="deep_sleep_duration",
+        translation_key="deep_sleep_duration",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            round(data.daily_summary.deep_sleep_seconds / 60, 1)
+            if data.daily_summary and data.daily_summary.deep_sleep_seconds is not None
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="rem_sleep_duration",
+        translation_key="rem_sleep_duration",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            round(data.daily_summary.rem_sleep_seconds / 60, 1)
+            if data.daily_summary and data.daily_summary.rem_sleep_seconds is not None
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="light_sleep_duration",
+        translation_key="light_sleep_duration",
+        native_unit_of_measurement="min",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            round(data.daily_summary.light_sleep_seconds / 60, 1)
+            if data.daily_summary and data.daily_summary.light_sleep_seconds is not None
+            else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="resting_heart_rate",
+        translation_key="resting_heart_rate",
+        native_unit_of_measurement="bpm",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: (
+            data.daily_summary.resting_heart_rate if data.daily_summary else None
+        ),
+    ),
+    WorkoutSensorDescription(
+        key="oura_avg_hrv",
+        translation_key="oura_avg_hrv",
+        native_unit_of_measurement="ms",
+        state_class=SensorStateClass.MEASUREMENT,
+        value_fn=lambda data: data.daily_summary.oura_avg_hrv if data.daily_summary else None,
+    ),
+)
+
 #: "Last activity" sensors — meaningful for any source that reports activities
 #: at all, including Apple Health (once at least one workout has been pushed).
 LAST_ACTIVITY_SENSORS: tuple[WorkoutSensorDescription, ...] = (
@@ -415,6 +522,11 @@ SOURCES_WITH_HRV = {SOURCE_GARMIN, SOURCE_COROS}
 #: training-load fields (see models.py's Activity docstring) — currently
 #: Garmin only.
 SOURCES_WITH_ACTIVITY_DETAIL = {SOURCE_GARMIN}
+
+#: Source types that get OURA_SENSORS above — currently Oura only. See
+#: that tuple's own docstring for why this is separate from
+#: SOURCES_WITH_DAILY_SUMMARY/SOURCES_WITH_HRV rather than folded into them.
+SOURCES_WITH_OURA = {SOURCE_OURA}
 
 
 def _format_duration(total_seconds: float | None) -> str | None:
@@ -594,6 +706,8 @@ async def async_setup_entry(
     # in SOURCES_WITH_HRV without being in SOURCES_WITH_DAILY_SUMMARY.
     if source_type in SOURCES_WITH_HRV:
         summary_descriptions = list(HRV_SENSORS) + summary_descriptions
+    if source_type in SOURCES_WITH_OURA:
+        summary_descriptions = list(OURA_SENSORS) + summary_descriptions
     if source_type in SOURCES_WITH_ACTIVITY_DETAIL:
         summary_descriptions = list(LAST_ACTIVITY_DETAIL_SENSORS) + summary_descriptions
     # Per-entry, not per-source-type: whether THIS Coros entry has MCP

@@ -42,6 +42,7 @@ from .const import (
     CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
     CONF_GARMIN_API_KEY,
+    CONF_OURA_ACCESS_TOKEN,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
     CONF_WEEK_START_DAY,
@@ -52,6 +53,7 @@ from .const import (
     SOURCE_APPLE_HEALTH,
     SOURCE_COROS,
     SOURCE_GARMIN,
+    SOURCE_OURA,
     SOURCE_STRAVA,
     STRAVA_OAUTH_SCOPES,
     WEEK_START_DAY_OPTIONS,
@@ -60,6 +62,7 @@ from .sources.base import WorkoutSourceAuthError, WorkoutSourceError
 from .sources.coros import CorosSource
 from .sources.coros_mcp import CorosMcpClient, McpTokenSet
 from .sources.garmin import GarminSource
+from .sources.oura import OuraSource
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -69,10 +72,16 @@ STEP_GARMIN_SCHEMA = vol.Schema(
     }
 )
 
+STEP_OURA_SCHEMA = vol.Schema(
+    {
+        vol.Required(CONF_OURA_ACCESS_TOKEN): str,
+    }
+)
+
 _SOURCE_PICKER_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_SOURCE_TYPE): vol.In(
-            [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS]
+            [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS, SOURCE_OURA]
         )
     }
 )
@@ -141,6 +150,7 @@ class HaWorkoutsConfigFlow(
         self._email: str | None = None
         self._password: str | None = None
         self._garmin_api_key: str | None = None
+        self._oura_access_token: str | None = None
         self._coros_region: str | None = None
         self._coros_mcp_tokens: McpTokenSet | None = None
         self._pending_oauth_data: dict[str, Any] | None = None
@@ -170,6 +180,8 @@ class HaWorkoutsConfigFlow(
                 return await self.async_step_apple_health()
             if user_input[CONF_SOURCE_TYPE] == SOURCE_COROS:
                 return await self.async_step_coros()
+            if user_input[CONF_SOURCE_TYPE] == SOURCE_OURA:
+                return await self.async_step_oura()
             return await self.async_step_pick_implementation()
 
         return self.async_show_form(step_id="user", data_schema=_SOURCE_PICKER_SCHEMA)
@@ -213,6 +225,43 @@ class HaWorkoutsConfigFlow(
 
         return self.async_show_form(
             step_id="garmin", data_schema=STEP_GARMIN_SCHEMA, errors=errors
+        )
+
+    # --- Oura: Personal Access Token form -----------------------------------
+
+    async def async_step_oura(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            access_token = user_input[CONF_OURA_ACCESS_TOKEN]
+
+            # Unique per token, not per account (which this flow never
+            # collects directly) — same reasoning as Garmin's API key
+            # above: avoids ever storing the raw token as the entry's
+            # unique_id.
+            await self.async_set_unique_id(
+                f"{SOURCE_OURA}_{hashlib.sha256(access_token.encode()).hexdigest()}"
+            )
+            self._abort_if_unique_id_configured()
+
+            source = OuraSource(self.hass, access_token)
+            try:
+                await source.async_authenticate()
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Oura access token")
+                errors["base"] = "unknown"
+            else:
+                self._oura_access_token = access_token
+                return await self.async_step_backfill()
+
+        return self.async_show_form(
+            step_id="oura", data_schema=STEP_OURA_SCHEMA, errors=errors
         )
 
     # --- Coros: plain email/password form, plus a region picker ------------
@@ -430,6 +479,16 @@ class HaWorkoutsConfigFlow(
                     # just "Coros", not "Coros (email)".
                     title="Coros",
                     data=data,
+                    options={CONF_BACKFILL_DAYS: backfill_days},
+                )
+            if self._oura_access_token is not None:
+                return self.async_create_entry(
+                    # Same reasoning as the Garmin/Coros titles above.
+                    title="Oura",
+                    data={
+                        CONF_SOURCE_TYPE: SOURCE_OURA,
+                        CONF_OURA_ACCESS_TOKEN: self._oura_access_token,
+                    },
                     options={CONF_BACKFILL_DAYS: backfill_days},
                 )
             return self.async_create_entry(

@@ -15,11 +15,19 @@ CONF_BACKFILL_DAYS = "backfill_days"
 #: Reconfigure when that happens.
 CONF_GARMIN_API_KEY = "garmin_api_key"
 
+#: Oura Personal Access Token (see sources/oura.py's module docstring) — a
+#: single long-lived bearer token the user generates themselves at
+#: cloud.ouraring.com/personal-access-tokens. Same shape as
+#: CONF_GARMIN_API_KEY above: no OAuth client/secret, no refresh token, the
+#: token simply works until revoked.
+CONF_OURA_ACCESS_TOKEN = "oura_access_token"
+
 SOURCE_GARMIN = "garmin"
 SOURCE_STRAVA = "strava"
 SOURCE_APPLE_HEALTH = "apple_health"
 SOURCE_COROS = "coros"
-SOURCE_TYPES = [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS]
+SOURCE_OURA = "oura"
+SOURCE_TYPES = [SOURCE_GARMIN, SOURCE_STRAVA, SOURCE_APPLE_HEALTH, SOURCE_COROS, SOURCE_OURA]
 
 #: Coros account region — determines which regional API host a login token is
 #: valid on (a token from one region is rejected by the others). See

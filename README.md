@@ -1,23 +1,24 @@
 # HA Workouts
 
 Bring your running, cycling, and other workout data from **Garmin, Coros,
-Strava, and Apple Health** into **Home Assistant** as native sensors — steps,
-heart rate, HRV, sleep, recovery, training load, VO2max/personal bests (where
-available), and long-term statistics for charting aggregated activity over
-time (monthly running distance, year-to-date totals, year-over-year
-comparisons). Each run or ride also shows up as a calendar event with a full
-per-km split breakdown (pace, heart rate, power, cadence, elevation per km),
+Strava, Oura, and Apple Health** into **Home Assistant** as native sensors —
+steps, heart rate, HRV, sleep, recovery, training load, VO2max/personal bests
+(where available), readiness/sleep/activity scores (Oura), and long-term
+statistics for charting aggregated activity over time (monthly running
+distance, year-to-date totals, year-over-year comparisons). Each run or ride
+also shows up as a calendar event with a full per-km split breakdown (pace,
+heart rate, power, cadence, elevation per km, where the source provides it),
 and every sensor this integration creates can be exposed to an AI
 assistant/MCP client via Home Assistant's own Model Context Protocol Server
 integration — see [Letting an AI assistant query your
 data](#letting-an-ai-assistant-query-your-data-mcp) below.
 
 A free, open-source Home Assistant custom integration, installed via
-[HACS](https://hacs.xyz/). You can add Garmin, Coros, Strava, Apple Health, or
-any combination — each is a separate config entry with its own
+[HACS](https://hacs.xyz/). You can add Garmin, Coros, Strava, Oura, Apple
+Health, or any combination — each is a separate config entry with its own
 source-prefixed sensors (`sensor.garmin_*`, `sensor.coros_*`,
-`sensor.strava_*`, `sensor.apple_health_*`), so data from each source can be
-charted separately or side by side.
+`sensor.strava_*`, `sensor.oura_*`, `sensor.apple_health_*`), so data from
+each source can be charted separately or side by side.
 
 ## Supported sources
 
@@ -35,14 +36,23 @@ charted separately or side by side.
   something this integration can work around. Without a subscription, Strava
   marks the application "Inactive" and rejects requests with a 403 error even
   after a successful sign-in.
+- **Oura** (**beta** — not yet tested against a real account, see [Oura
+  setup](#oura-setup-beta) below) — a self-serve Personal Access Token you
+  generate yourself in your Oura account's own settings (no developer
+  account, app registration, or OAuth approval needed). Provides daily
+  Readiness/Sleep/Activity scores, sleep-stage detail, steps, and workouts —
+  no per-km/mile split data (Oura's API has none).
 - **Apple Health** — via a webhook pushed from an iOS Shortcut (see
   [Apple Health setup](#apple-health-setup) below). Apple doesn't offer a
   cloud API for Health data, so this works by receiving workouts from your
   phone rather than pulling them. There's no depth setting to choose like
-  Garmin/Coros/Strava's backfill — instead, the Shortcut's "Get Workouts"
-  action returns your full on-device workout history the first time it runs,
-  so your existing history arrives all at once as soon as you run it.
-- Google Fit / Fitbit — not yet supported.
+  Garmin/Coros/Strava/Oura's backfill — instead, the Shortcut's "Get
+  Workouts" action returns your full on-device workout history the first
+  time it runs, so your existing history arrives all at once as soon as you
+  run it.
+- Google Fit / Fitbit — not currently supported (Fitbit's legacy API was
+  retired by Google in November 2026, and its replacement, the Google Health
+  API, isn't yet open to new third-party developer projects).
 
 ## Installation
 
@@ -51,20 +61,21 @@ charted separately or side by side.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration**, search for
    "HA Workouts".
-4. Choose a source (Garmin, Coros, Strava, or Apple Health) and follow the
-   prompts — see [Garmin setup](#garmin-setup) / [Coros setup](#coros-setup) /
-   [Strava setup](#strava-setup) / [Apple Health setup](#apple-health-setup)
+4. Choose a source (Garmin, Coros, Strava, Oura, or Apple Health) and follow
+   the prompts — see [Garmin setup](#garmin-setup) / [Coros
+   setup](#coros-setup) / [Strava setup](#strava-setup) / [Oura setup
+   (beta)](#oura-setup-beta) / [Apple Health setup](#apple-health-setup)
    below.
-5. For Garmin, Coros, and Strava: choose how far back to import history. This
-   backfill runs in the background after setup finishes — for several years
-   of history it can take several minutes (see
+5. For Garmin, Coros, Strava, and Oura: choose how far back to import
+   history. This backfill runs in the background after setup finishes — for
+   several years of history it can take several minutes (see
    [History backfill](#history-backfill) below) — and can be extended later
    without redoing it via the integration's **Configure** option. (Apple
    Health has no depth to choose — see
    [Apple Health setup](#apple-health-setup) below for how its history
    arrives instead.)
 6. To add another source, repeat from step 3 (e.g. add Garmin, then run
-   setup again and add Coros, Strava, and/or Apple Health).
+   setup again and add Coros, Strava, Oura, and/or Apple Health).
 
 ### Garmin setup
 
@@ -180,6 +191,33 @@ never uses a shared/bundled key:
    [Troubleshooting](#troubleshooting).
 6. Continue the HA Workouts config flow — you'll be redirected to Strava to
    authorize access, then back here to finish setup.
+
+### Oura setup (beta)
+
+**Oura support is new and currently in beta** — every field and endpoint used
+was verified against Oura's own published API documentation, but it hasn't
+yet been tested against a real Oura account (the author doesn't own a ring).
+If you try it, please [open an
+issue](https://github.com/mrvautin/ha-workouts/issues) with anything that
+looks wrong — it helps a lot.
+
+Oura uses a Personal Access Token — no app registration, no OAuth, no
+Application Credentials step:
+
+1. Sign in at [cloud.ouraring.com](https://cloud.ouraring.com/personal-access-tokens)
+   and go to **Personal Access Tokens**.
+2. Click **Create A New Personal Access Token**, give it a name (e.g. "Home
+   Assistant"), and click **Create**.
+3. Copy the token shown — it's only displayed once.
+4. Start the HA Workouts config flow, choose **Oura**, and paste the token in.
+
+If you revoke the token in your Oura account later, generate a new one the
+same way and re-add this integration with it.
+
+Oura provides daily Readiness, Sleep, and Activity scores, sleep-stage detail
+(deep/REM/light sleep, heart rate and HRV during sleep), steps, and any
+workouts logged in the Oura app as calendar events — but no per-km/mile split
+data (Oura's API has none).
 
 ### Apple Health setup (needs paid app)
 

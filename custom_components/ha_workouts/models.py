@@ -158,6 +158,29 @@ class DailySummary:
     #: surfaces inside training_readiness_* above, not as its own number.
     training_load_short_term: float | None = None
     training_load_long_term: float | None = None
+    #: Oura's own daily readiness score, 1-100 — confirmed via Oura's
+    #: published OpenAPI spec (PublicDailyReadiness.score) to be a distinct
+    #: figure from sleep_score/activity_score below, not a renamed version
+    #: of either. See sources/oura.py.
+    readiness_score: int | None = None
+    #: Oura's own daily activity score, 1-100 (PublicDailyActivity.score) —
+    #: separate from sleep_score (PublicDailySleep.score, shared field above)
+    #: and readiness_score above; Oura computes all three independently.
+    activity_score: int | None = None
+    #: Deep/REM/light/awake sleep stage durations in seconds, from Oura's
+    #: separate "sleep" (session-level) endpoint — NOT available on the same
+    #: document as sleep_score above (PublicDailySleep has no duration
+    #: fields at all, confirmed via Oura's schema: only id/day/score/
+    #: contributors/timestamp). See sources/oura.py's module docstring.
+    deep_sleep_seconds: float | None = None
+    rem_sleep_seconds: float | None = None
+    light_sleep_seconds: float | None = None
+    #: Average heart rate variability during sleep, in milliseconds — Oura's
+    #: own average_hrv field on the sleep session, distinct from
+    #: hrv_last_night_avg above (that field is populated only by Garmin;
+    #: kept separate rather than reused since the two sources compute "last
+    #: night's HRV" differently and shouldn't be silently merged).
+    oura_avg_hrv: float | None = None
 
 
 @dataclass(slots=True)

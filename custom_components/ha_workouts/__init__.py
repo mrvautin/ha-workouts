@@ -25,6 +25,7 @@ from .const import (
     CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
     CONF_GARMIN_API_KEY,
+    CONF_OURA_ACCESS_TOKEN,
     CONF_SOURCE_TYPE,
     CONF_WEBHOOK_ID,
     DEFAULT_COROS_REGION,
@@ -32,6 +33,7 @@ from .const import (
     SOURCE_APPLE_HEALTH,
     SOURCE_COROS,
     SOURCE_GARMIN,
+    SOURCE_OURA,
     SOURCE_STRAVA,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
@@ -40,6 +42,7 @@ from .sources.base import WorkoutSource
 from .sources.coros import CorosSource
 from .sources.coros_mcp import McpTokenSet
 from .sources.garmin import GarminSource
+from .sources.oura import OuraSource
 from .sources.strava import StravaSource
 from .statistics_import import async_wipe_source_data
 
@@ -52,6 +55,8 @@ async def _build_source(hass: HomeAssistant, entry: ConfigEntry) -> WorkoutSourc
     source_type = entry.data[CONF_SOURCE_TYPE]
     if source_type == SOURCE_GARMIN:
         return GarminSource(hass, entry.data[CONF_GARMIN_API_KEY])
+    if source_type == SOURCE_OURA:
+        return OuraSource(hass, entry.data[CONF_OURA_ACCESS_TOKEN])
     if source_type == SOURCE_STRAVA:
         implementation = await config_entry_oauth2_flow.async_get_config_entry_implementation(
             hass, entry

@@ -3,7 +3,7 @@
     "step": {
       "user": {
         "title": "Add a data source",
-        "description": "Choose which service to pull workout data from. You can add Garmin, Coros, Strava, Apple Health, or any combination, by running this setup again.",
+        "description": "Choose which service to pull workout data from. You can add Garmin, Coros, Strava, Oura, Apple Health, or any combination, by running this setup again.",
         "data": {
           "source_type": "Source"
         }
@@ -13,6 +13,13 @@
         "description": "Enter a Garmin Connect Personal API key. This uses Garmin's own official Personal API, not your account password.\n\nTo create one: sign in at connect.garmin.com, go to **Settings → Personal API Key**, click **Create Key**, accept the terms, and choose how long it should last (up to 1 year). Copy the key shown — it's only displayed once.\n\nThe key is stored locally in Home Assistant. When it expires, generate a new one the same way and re-add this integration with it.",
         "data": {
           "garmin_api_key": "Personal API key"
+        }
+      },
+      "oura": {
+        "title": "Connect to Oura",
+        "description": "Enter an Oura Personal Access Token. This uses Oura's own official Cloud API, not your account password.\n\nTo create one: sign in at cloud.ouraring.com, go to **Personal Access Tokens**, click **Create A New Personal Access Token**, give it a name, and click **Create**. Copy the token shown — it's only displayed once.\n\nThe token is stored locally in Home Assistant. If you revoke it in your Oura account, generate a new one the same way and re-add this integration with it.",
+        "data": {
+          "oura_access_token": "Personal Access Token"
         }
       },
       "coros": {
@@ -228,6 +235,24 @@
       },
       "activity_yeartd": {
         "name": "{activity_type} this year"
+      },
+      "readiness_score": {
+        "name": "Readiness score"
+      },
+      "activity_score": {
+        "name": "Activity score"
+      },
+      "deep_sleep_duration": {
+        "name": "Deep sleep duration"
+      },
+      "rem_sleep_duration": {
+        "name": "REM sleep duration"
+      },
+      "light_sleep_duration": {
+        "name": "Light sleep duration"
+      },
+      "oura_avg_hrv": {
+        "name": "Average HRV during sleep"
       }
     },
     "calendar": {
