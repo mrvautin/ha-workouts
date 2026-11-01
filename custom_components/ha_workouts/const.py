@@ -6,6 +6,21 @@ DOMAIN = "ha_workouts"
 CONF_SOURCE_TYPE = "source_type"
 CONF_BACKFILL_DAYS = "backfill_days"
 
+#: Optional manual override for "All available history" (CONF_BACKFILL_DAYS
+#: stored as 0) — a user-supplied date to walk statistics/personal-bests
+#: backfill back to directly, bypassing the consecutive-empty-chunks
+#: auto-detection entirely (see statistics_import.py's
+#: _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP / _CONSECUTIVE_EMPTY_CHUNKS_BEFORE_ANY_ACTIVITY
+#: docstrings). Exists for two reasons: (1) a user who already knows exactly
+#: how far back their real history goes can skip the auto-detection walk
+#: entirely and jump straight there, and (2) it doubles as a manual fix for
+#: anyone who hit the pre-fix bug (GitHub issue #1) and has a bad cached
+#: earliest-day value from before the auto-detection logic was corrected —
+#: setting this explicitly overrides that cached value on the next backfill
+#: run. Stored as an ISO date string ("YYYY-MM-DD"), matching what HA's
+#: DateSelector submits; None/absent means "no override, use auto-detection".
+CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE = "earliest_activity_date_override"
+
 #: Garmin's official "Personal API" key (see sources/garmin.py's module
 #: docstring) — a single long-lived credential the user generates themselves
 #: at connect.garmin.com/app/settings/personalApiToken, replacing the

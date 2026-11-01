@@ -27,6 +27,7 @@ from homeassistant.data_entry_flow import FlowResultType
 from homeassistant.helpers import config_entry_oauth2_flow
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from homeassistant.helpers.selector import (
+    DateSelector,
     SelectOptionDict,
     SelectSelector,
     SelectSelectorConfig,
@@ -41,6 +42,7 @@ from .const import (
     CONF_COROS_MCP_EXPIRES_AT,
     CONF_COROS_MCP_REFRESH_TOKEN,
     CONF_COROS_REGION,
+    CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE,
     CONF_GARMIN_API_KEY,
     CONF_OURA_ACCESS_TOKEN,
     CONF_SOURCE_TYPE,
@@ -112,7 +114,15 @@ _BACKFILL_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_BACKFILL_DAYS, default="1 year"): _label_selector(
             BACKFILL_DAYS_OPTIONS
-        )
+        ),
+        # Optional — only meaningful for "All available history"; see
+        # const.py's CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE docstring. Shown
+        # for every backfill depth rather than conditionally, same as every
+        # other field in this schema — a fixed depth already bounds start_day
+        # on its own, so setting this alongside one is harmless (it simply
+        # has no effect; see async_backfill_activity_statistics's use of
+        # max(start_day, earliest_override)).
+        vol.Optional(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE): DateSelector(),
     }
 )
 
@@ -456,11 +466,14 @@ class HaWorkoutsConfigFlow(
     ) -> ConfigFlowResult:
         if user_input is not None:
             backfill_days = BACKFILL_DAYS_OPTIONS[user_input[CONF_BACKFILL_DAYS]]
+            options: dict[str, Any] = {CONF_BACKFILL_DAYS: backfill_days}
+            if earliest_override := user_input.get(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE):
+                options[CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE] = earliest_override
             if self._pending_oauth_data is not None:
                 return self.async_create_entry(
                     title=self._pending_title,
                     data=self._pending_oauth_data,
-                    options={CONF_BACKFILL_DAYS: backfill_days},
+                    options=options,
                 )
             if self._coros_region is not None:
                 data: dict[str, Any] = {
@@ -479,7 +492,7 @@ class HaWorkoutsConfigFlow(
                     # just "Coros", not "Coros (email)".
                     title="Coros",
                     data=data,
-                    options={CONF_BACKFILL_DAYS: backfill_days},
+                    options=options,
                 )
             if self._oura_access_token is not None:
                 return self.async_create_entry(
@@ -489,7 +502,7 @@ class HaWorkoutsConfigFlow(
                         CONF_SOURCE_TYPE: SOURCE_OURA,
                         CONF_OURA_ACCESS_TOKEN: self._oura_access_token,
                     },
-                    options={CONF_BACKFILL_DAYS: backfill_days},
+                    options=options,
                 )
             return self.async_create_entry(
                 # Deliberately just "Garmin", not "Garmin (account)": this
@@ -502,7 +515,7 @@ class HaWorkoutsConfigFlow(
                     CONF_SOURCE_TYPE: SOURCE_GARMIN,
                     CONF_GARMIN_API_KEY: self._garmin_api_key,
                 },
-                options={CONF_BACKFILL_DAYS: backfill_days},
+                options=options,
             )
 
         return self.async_show_form(step_id="backfill", data_schema=_BACKFILL_SCHEMA)
@@ -573,6 +586,7 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
         # choice already made isn't lost while that extra step runs.
         self._pending_backfill_days: int | None = None
         self._pending_week_start_day: int | None = None
+        self._pending_earliest_override: str | None = None
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None
@@ -583,16 +597,19 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
         if user_input is not None:
             backfill_days = BACKFILL_DAYS_OPTIONS[user_input[CONF_BACKFILL_DAYS]]
             week_start_day = WEEK_START_DAY_OPTIONS[user_input[CONF_WEEK_START_DAY]]
+            earliest_override = user_input.get(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE)
             if user_input.get(_CONNECT_MCP_FIELD):
                 self._pending_backfill_days = backfill_days
                 self._pending_week_start_day = week_start_day
+                self._pending_earliest_override = earliest_override
                 return await self.async_step_connect_coros_mcp()
-            return self.async_create_entry(
-                data={
-                    CONF_BACKFILL_DAYS: backfill_days,
-                    CONF_WEEK_START_DAY: week_start_day,
-                }
-            )
+            options: dict[str, Any] = {
+                CONF_BACKFILL_DAYS: backfill_days,
+                CONF_WEEK_START_DAY: week_start_day,
+            }
+            if earliest_override:
+                options[CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE] = earliest_override
+            return self.async_create_entry(data=options)
 
         current_days = self.config_entry.options.get(
             CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS
@@ -610,6 +627,21 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
                 default=_current_week_start_label(self.config_entry.options),
             ): _label_selector(WEEK_START_DAY_OPTIONS),
         }
+        # Same optional override field as initial setup (_BACKFILL_SCHEMA) —
+        # also lets someone fix a bad cached earliest-day value from before
+        # this bug was corrected (see const.py's
+        # CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE docstring) without having to
+        # remove and re-add the integration. Pre-filled with the currently
+        # stored override, if any, so reopening this dialog doesn't silently
+        # clear it.
+        current_override = self.config_entry.options.get(
+            CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE
+        )
+        schema_fields[
+            vol.Optional(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE, default=current_override)
+            if current_override
+            else vol.Optional(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE)
+        ] = DateSelector()
         # Offer to connect Coros MCP here too — not just at initial setup
         # (async_step_coros_mcp) — for a Coros entry that skipped it then,
         # or was created before this option existed at all. Not shown once
@@ -665,12 +697,15 @@ class HaWorkoutsOptionsFlow(OptionsFlow):
                         CONF_COROS_MCP_EXPIRES_AT: tokens.expires_at_epoch,
                     },
                 )
-                return self.async_create_entry(
-                    data={
-                        CONF_BACKFILL_DAYS: self._pending_backfill_days,
-                        CONF_WEEK_START_DAY: self._pending_week_start_day,
-                    }
-                )
+                options: dict[str, Any] = {
+                    CONF_BACKFILL_DAYS: self._pending_backfill_days,
+                    CONF_WEEK_START_DAY: self._pending_week_start_day,
+                }
+                if self._pending_earliest_override:
+                    options[CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE] = (
+                        self._pending_earliest_override
+                    )
+                return self.async_create_entry(data=options)
 
         return self.async_show_form(step_id="connect_coros_mcp", errors=errors)
 

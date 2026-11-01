@@ -46,7 +46,11 @@
         "title": "Import history",
         "description": "How far back should we import your activity history? This runs in the background after setup and can be extended later from Configure.",
         "data": {
-          "backfill_days": "History to import"
+          "backfill_days": "History to import",
+          "earliest_activity_date_override": "Earliest activity date (optional, advanced)"
+        },
+        "data_description": {
+          "earliest_activity_date_override": "Only used with \"All available history\". Leave blank unless you already know the exact date your real history starts — setting it skips the automatic detection and jumps straight there."
         }
       },
       "apple_health": {
@@ -80,7 +84,11 @@
         "data": {
           "backfill_days": "History to import",
           "week_start_day": "Week starts on",
-          "connect_mcp": "Also connect Coros health & fitness data (steps, sleep, HRV, recovery, fitness assessment, training load)"
+          "connect_mcp": "Also connect Coros health & fitness data (steps, sleep, HRV, recovery, fitness assessment, training load)",
+          "earliest_activity_date_override": "Earliest activity date (optional, advanced)"
+        },
+        "data_description": {
+          "earliest_activity_date_override": "Only used with \"All available history\". Leave blank unless you already know the exact date your real history starts, or need to correct a wrong cutoff from before this was fixed (see the History start date sensor)."
         }
       },
       "connect_coros_mcp": {

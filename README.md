@@ -473,6 +473,21 @@ fresh, self-healing import (see [History backfill](#history-backfill)). For
 Apple Health, which doesn't have a backfill setting to re-trigger, re-run
 the Shortcut to resend the affected workouts instead.
 
+**"All available history" stops at a date that's clearly wrong — real,
+older activity exists before it** — versions before v0.15.1 had a bug where,
+if your most recent ~9 months of activity were empty (e.g. returning from a
+long break, or a freshly-connected account that had been idle), the
+automatic "how far back does real history go" detection could give up
+before ever reaching your actual older history, and permanently cache that
+wrong cutoff (see the **History start date** sensor). This is fixed going
+forward, but a bad cutoff cached by an earlier version won't correct itself
+automatically. To fix it: open **Configure** on the affected entry and set
+**Earliest activity date** to the real date your history starts (or earlier
+— extra headroom doesn't cost anything, the detection logic will walk
+forward from there and find the real boundary on its own), then save. This
+field is optional and only used for "All available history" — leave it
+blank otherwise.
+
 **Apple Health: the Shortcut runs but no data shows up** — first confirm the
 webhook URL is actually reachable from your phone: open it directly in
 Safari on the phone (not just in a browser on the same computer running HA).

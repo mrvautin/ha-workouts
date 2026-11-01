@@ -132,18 +132,46 @@ _CHUNK_DAYS = 90
 # retry rather than aborting a multi-year import over one transient 429.
 _RATE_LIMIT_RETRY_DELAYS = (60, 300, 900)  # 1 min, 5 min, 15 min
 
-# For "All available history" (backfill_days=0, start_day=1970-01-01): stop
-# walking further back once this many consecutive chunks come back with zero
-# activities. Without this, an account with a real history of only, say, a
-# few months would still walk chunk-by-chunk all the way back to 1970 — every
-# one of those chunks genuinely empty, but each one still costs a full
-# request + backfill_chunk_pause_seconds wait, for no benefit. This is a real
-# bug that was hit in practice: a real account's backfill was still fetching
-# chunks back to 2018 with zero real data past ~Feb 2026. 3 consecutive empty
-# chunks (~270 days with zero activities) is generous enough to not falsely
-# stop during a genuinely long inactive stretch (e.g. an injury break) while
-# still cutting off a many-years-long walk through empty history quickly.
+# For "All available history" (backfill_days=0, start_day=1970-01-01): once
+# at least one activity has been seen, stop walking further back after this
+# many consecutive empty chunks. Without this, an account with a real
+# history of only, say, a few months would still walk chunk-by-chunk all the
+# way back to 1970 — every one of those chunks genuinely empty, but each one
+# still costs a full request + backfill_chunk_pause_seconds wait, for no
+# benefit. This is a real bug that was hit in practice: a real account's
+# backfill was still fetching chunks back to 2018 with zero real data past
+# ~Feb 2026. 3 consecutive empty chunks (~270 days with zero activities) is
+# generous enough to not falsely stop during a genuinely long inactive
+# stretch occurring MID-HISTORY (e.g. an injury break) while still cutting
+# off a many-years-long walk through empty history quickly.
+#
+# Deliberately gated on "at least one activity has been seen" (see
+# seen_any_activity below) rather than counting from the very first chunk —
+# originally it counted unconditionally, which meant an account whose most
+# RECENT ~270+ days were empty (e.g. returning after a long break, or a
+# freshly-connected account idle since last season) would hit this early-
+# stop before ever reaching any real activity, permanently caching that
+# recent boundary as "the earliest known day" and walling off all genuine
+# older history on every future run (GitHub issue #1 — confirmed reproducible
+# and fixed by this gating). The looser threshold below
+# (_CONSECUTIVE_EMPTY_CHUNKS_BEFORE_ANY_ACTIVITY) still protects a genuinely
+# empty/new account from grinding all the way to 1970.
 _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP = 3
+
+# Looser counterpart to _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP above, used ONLY
+# before any activity has been seen at all (seen_any_activity is still
+# False) — has to tolerate however long someone's trailing inactivity has
+# been (could genuinely be a year or more between an old account's last
+# activity and today) without falsely giving up before reaching their real,
+# older history. 20 consecutive empty chunks is ~5 years of zero activity
+# with nothing found yet; past that, it's reasonable to conclude the account
+# genuinely has no history at all. Unlike the post-activity case, reaching
+# this threshold does NOT cache anything via async_set_earliest_known_activity_day
+# — "no activity found anywhere in the walked range" is not a confirmed
+# boundary the way "empty chunks immediately behind real activity" is, so
+# there's nothing safe to persist; the next run will walk it again (bounded,
+# so this is an acceptable repeated cost for a genuinely history-less account).
+_CONSECUTIVE_EMPTY_CHUNKS_BEFORE_ANY_ACTIVITY = 20
 
 # Serializes async_apply_activity_deltas calls per statistic_id. Each call reads
 # the latest stored sum, computes a new running total, then writes it back —
@@ -318,6 +346,7 @@ async def async_backfill_activity_statistics(
     backfill_days: int,
     progress: BackfillProgress,
     request_lock: asyncio.Lock,
+    earliest_override: date | None = None,
 ) -> None:
     """Ensure statistics fully cover [backfill_days ago, yesterday] for every sensor.
 
@@ -333,19 +362,34 @@ async def async_backfill_activity_statistics(
     so the two never send concurrent request streams to the source, while still
     letting the coordinator's poll interleave between backfill chunks rather than
     being blocked for the run's full duration.
+
+    earliest_override (see const.py's CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE) is a
+    user-supplied date that, when set, becomes start_day directly — skipping both
+    the cached-earliest-day lookup below AND the consecutive-empty-chunks
+    auto-detection in the walk itself (the loop's own
+    `while chunk_end >= start_day` condition simply stops there). Lets a user who
+    already knows their real history's start skip the walk, and doubles as a
+    manual fix for anyone whose cached earliest-day value was wrong because of a
+    bug in the auto-detection logic that's since been corrected (GitHub issue #1).
     """
     today = dt_util.now().date()
     end_day = today - timedelta(days=1)
     start_day = date(1970, 1, 1) if backfill_days == 0 else today - timedelta(days=backfill_days)
 
-    # If a previous run already walked back through empty history and hit the
-    # early-stop below, don't re-walk that same confirmed-empty range again —
-    # start from whichever is later: the requested depth, or the previously
-    # discovered real boundary. Only relevant for "All available history";
-    # for a fixed depth start_day is already bounded and this is a no-op.
-    cached_earliest = await async_get_earliest_known_activity_day(hass, entry_slug)
-    if cached_earliest is not None and cached_earliest > start_day:
-        start_day = cached_earliest
+    if earliest_override is not None:
+        start_day = max(start_day, earliest_override)
+    else:
+        # If a previous run already walked back through empty history and hit
+        # the early-stop below, don't re-walk that same confirmed-empty range
+        # again — start from whichever is later: the requested depth, or the
+        # previously discovered real boundary. Only relevant for "All
+        # available history"; for a fixed depth start_day is already bounded
+        # and this is a no-op. Skipped entirely when earliest_override is set
+        # above — the override is explicitly meant to bypass this cache,
+        # including a stale/wrong value cached by the pre-fix bug.
+        cached_earliest = await async_get_earliest_known_activity_day(hass, entry_slug)
+        if cached_earliest is not None and cached_earliest > start_day:
+            start_day = cached_earliest
 
     progress.state = "running"
     progress.target_day = start_day
@@ -380,6 +424,10 @@ async def async_backfill_activity_statistics(
         # the originally-requested start_day.
         earliest_day_reached = end_day
         consecutive_empty_chunks = 0
+        # Gates which early-stop threshold/behavior applies — see
+        # _CONSECUTIVE_EMPTY_CHUNKS_BEFORE_ANY_ACTIVITY's docstring for why
+        # this distinction exists (GitHub issue #1).
+        seen_any_activity = False
 
         chunk_end = end_day
         while chunk_end >= start_day:
@@ -408,29 +456,46 @@ async def async_backfill_activity_statistics(
 
             if activities:
                 consecutive_empty_chunks = 0
+                seen_any_activity = True
             else:
                 consecutive_empty_chunks += 1
-                if consecutive_empty_chunks >= _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP:
-                    # For a fixed depth (backfill_days != 0) this can't
-                    # trigger meaningfully early — start_day is already a
-                    # bounded, user-chosen window — but for "All available
-                    # history" (backfill_days=0, start_day=1970-01-01) this
-                    # is what stops a real account (with, say, only a few
-                    # months of genuine history) from walking chunk-by-chunk
-                    # all the way back to 1970, burning a full request +
-                    # pacing delay per chunk for years of guaranteed-empty
-                    # history. See _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP's
-                    # comment for why 3 chunks specifically.
-                    _LOGGER.debug(
-                        "Stopping backfill for %s after %d consecutive empty "
-                        "chunks — assuming no history before %s",
-                        entry_slug,
-                        consecutive_empty_chunks,
-                        chunk_start,
-                    )
-                    await async_set_earliest_known_activity_day(
-                        hass, entry_slug, earliest_day_reached
-                    )
+                threshold = (
+                    _CONSECUTIVE_EMPTY_CHUNKS_TO_STOP
+                    if seen_any_activity
+                    else _CONSECUTIVE_EMPTY_CHUNKS_BEFORE_ANY_ACTIVITY
+                )
+                if consecutive_empty_chunks >= threshold:
+                    if seen_any_activity:
+                        # A confirmed gap BEHIND real activity already found
+                        # — e.g. an injury break mid-history, or genuinely no
+                        # history before this point. Safe to cache: a future
+                        # run can skip re-walking this confirmed-empty range.
+                        _LOGGER.debug(
+                            "Stopping backfill for %s after %d consecutive "
+                            "empty chunks — assuming no history before %s",
+                            entry_slug,
+                            consecutive_empty_chunks,
+                            chunk_start,
+                        )
+                        await async_set_earliest_known_activity_day(
+                            hass, entry_slug, earliest_day_reached
+                        )
+                    else:
+                        # No activity found ANYWHERE in the walked range yet
+                        # — could still be a long recent inactive stretch
+                        # with real older history just beyond this point, so
+                        # this is NOT a confirmed boundary and must NOT be
+                        # cached (that was the bug — see GitHub issue #1).
+                        # Giving up here (rather than continuing to 1970)
+                        # only protects THIS run's pacing cost; a future run
+                        # will walk this same range again.
+                        _LOGGER.debug(
+                            "Stopping backfill for %s after %d consecutive "
+                            "empty chunks with no activity found at all — "
+                            "not caching, will re-check on next run",
+                            entry_slug,
+                            consecutive_empty_chunks,
+                        )
                     break
 
             chunk_end = chunk_start - timedelta(days=1)
@@ -483,6 +548,7 @@ async def async_backfill_personal_bests(
     source: WorkoutSource,
     backfill_days: int,
     request_lock: asyncio.Lock,
+    earliest_override: date | None = None,
 ) -> None:
     """Walk full activity history ONCE ever (per source, until a full wipe —
     see personal_bests.async_wipe_personal_bests_scanned_flag) folding every
@@ -517,6 +583,10 @@ async def async_backfill_personal_bests(
     bounded 2-year lookback rather than the unbounded 1970 walk — good
     enough for a personal-bests scan, which self-heals next restart anyway
     since nothing here is marked complete until a real bound was used.
+
+    earliest_override, when set, takes priority over both of the above —
+    same meaning as async_backfill_activity_statistics's own parameter of
+    the same name (see its docstring).
     """
     if await async_has_scanned_history_for_bests(hass, entry_slug):
         return
@@ -524,7 +594,9 @@ async def async_backfill_personal_bests(
     today = dt_util.now().date()
     end_day = today
     used_fallback_bound = False
-    if backfill_days == 0:
+    if earliest_override is not None:
+        start_day = earliest_override
+    elif backfill_days == 0:
         cached_earliest = await async_get_earliest_known_activity_day(hass, entry_slug)
         if cached_earliest is not None:
             start_day = cached_earliest

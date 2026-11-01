@@ -31,6 +31,7 @@ from .backfill_progress import BackfillProgress
 from .const import (
     CONF_BACKFILL_DAYS,
     CONF_COROS_MCP_ACCESS_TOKEN,
+    CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE,
     CONF_SOURCE_TYPE,
     CONF_WEEK_START_DAY,
     DEFAULT_BACKFILL_DAYS,
@@ -852,6 +853,14 @@ async def async_setup_entry(
         # config entry (auto-cancelled on unload/reload, not just HA
         # shutdown) rather than being a bare hass-level task.
         backfill_days = entry.options.get(CONF_BACKFILL_DAYS, DEFAULT_BACKFILL_DAYS)
+        # Optional manual override for "All available history" — see
+        # const.py's CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE docstring. Stored
+        # as an ISO date string by the config/options flow's DateSelector;
+        # parsed here once and threaded through to both backfill passes below.
+        earliest_override_raw = entry.options.get(CONF_EARLIEST_ACTIVITY_DATE_OVERRIDE)
+        earliest_override = (
+            date.fromisoformat(earliest_override_raw) if earliest_override_raw else None
+        )
         backfill_task = entry.async_create_background_task(
             hass,
             async_backfill_activity_statistics(
@@ -861,6 +870,7 @@ async def async_setup_entry(
                 backfill_days,
                 coordinator.backfill_progress,
                 coordinator.request_lock,
+                earliest_override,
             ),
             name=f"ha_workouts_{entry_slug}_statistics_backfill",
         )
@@ -935,6 +945,7 @@ async def async_setup_entry(
                     coordinator.source,
                     backfill_days,
                     coordinator.request_lock,
+                    earliest_override,
                 ),
                 name=f"ha_workouts_{entry_slug}_personal_bests_backfill",
             )
