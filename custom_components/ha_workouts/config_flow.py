@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+from collections.abc import Mapping
 from typing import Any
 
 import voluptuous as vol
@@ -50,6 +51,7 @@ from .const import (
     CONF_WEEK_START_DAY,
     COROS_REGION_OPTIONS,
     DEFAULT_BACKFILL_DAYS,
+    DEFAULT_COROS_REGION,
     DEFAULT_WEEK_START_DAY,
     DOMAIN,
     SOURCE_APPLE_HEALTH,
@@ -126,6 +128,14 @@ _BACKFILL_SCHEMA = vol.Schema(
     }
 )
 
+#: Reauth only ever needs a new password — email/region are properties of
+#: the account itself, not something that goes stale the way a password
+#: does, so re-asking for them would just be friction (and region in
+#: particular can't be validated by this step at all; getting it wrong would
+#: silently reintroduce the account-locked-to-a-region trap sources/coros.py's
+#: module docstring describes).
+_STEP_COROS_REAUTH_SCHEMA = vol.Schema({vol.Required(CONF_PASSWORD): str})
+
 _STEP_COROS_SCHEMA = vol.Schema(
     {
         vol.Required(CONF_EMAIL): str,
@@ -166,6 +176,12 @@ class HaWorkoutsConfigFlow(
         self._pending_oauth_data: dict[str, Any] | None = None
         self._pending_title: str | None = None
         self._apple_health_webhook_id: str | None = None
+        # Set by async_step_reauth, read by async_step_reauth_confirm — the
+        # existing entry's data (source type + its current, now-rejected
+        # credentials), so reauth_confirm knows which source's form to show
+        # and can pre-fill anything that isn't the actual bad credential
+        # (e.g. Coros's email/region, which reauth doesn't need to change).
+        self._reauth_entry_data: Mapping[str, Any] | None = None
 
     @property
     def logger(self) -> logging.Logger:
@@ -347,6 +363,141 @@ class HaWorkoutsConfigFlow(
 
         return self.async_show_form(
             step_id="coros_mcp", data_schema=_STEP_COROS_MCP_SCHEMA, errors=errors
+        )
+
+    # --- Reauth: Garmin key / Oura token / Coros password rejected --------
+    # (triggered by coordinator.py raising ConfigEntryAuthFailed — see
+    # sources/base.py's WorkoutSourceReauthRequiredError. Strava isn't
+    # covered here: its OAuth2Session refreshes tokens transparently via
+    # AbstractOAuth2FlowHandler, which has no equivalent "credential is just
+    # permanently wrong" failure mode the way a static key/token/password
+    # does — a revoked Strava grant surfaces as a 401 on the next API call,
+    # which the user resolves by re-authorizing through Strava's own consent
+    # screen, not by typing in a new credential here.)
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> ConfigFlowResult:
+        self._reauth_entry_data = entry_data
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        assert self._reauth_entry_data is not None
+        source_type = self._reauth_entry_data[CONF_SOURCE_TYPE]
+
+        if source_type == SOURCE_GARMIN:
+            return await self._async_step_reauth_garmin(user_input)
+        if source_type == SOURCE_OURA:
+            return await self._async_step_reauth_oura(user_input)
+        if source_type == SOURCE_COROS:
+            return await self._async_step_reauth_coros(user_input)
+        # Strava/Apple Health never raise ConfigEntryAuthFailed (see this
+        # section's own comment above), so HA should never actually route
+        # here for them — this exists only so a future source type that
+        # forgets to add its own reauth branch fails loudly during
+        # development rather than silently 500ing on a real user's account.
+        raise ValueError(f"No reauth flow implemented for source type: {source_type}")
+
+    async def _async_step_reauth_garmin(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            api_key = user_input[CONF_GARMIN_API_KEY]
+            source = GarminSource(self.hass, api_key)
+            try:
+                await source.async_authenticate()
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Garmin API key during reauth")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={CONF_GARMIN_API_KEY: api_key},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=STEP_GARMIN_SCHEMA,
+            errors=errors,
+            description_placeholders={"source_name": "Garmin"},
+        )
+
+    async def _async_step_reauth_oura(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            access_token = user_input[CONF_OURA_ACCESS_TOKEN]
+            source = OuraSource(self.hass, access_token)
+            try:
+                await source.async_authenticate()
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Oura access token during reauth")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={CONF_OURA_ACCESS_TOKEN: access_token},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=STEP_OURA_SCHEMA,
+            errors=errors,
+            description_placeholders={"source_name": "Oura"},
+        )
+
+    async def _async_step_reauth_coros(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        errors: dict[str, str] = {}
+        assert self._reauth_entry_data is not None
+
+        if user_input is not None:
+            password = user_input[CONF_PASSWORD]
+            # Email and region are read from the existing entry, not
+            # re-asked — see _STEP_COROS_REAUTH_SCHEMA's own comment.
+            source = CorosSource(
+                self.hass,
+                self._reauth_entry_data[CONF_EMAIL],
+                password,
+                self._reauth_entry_data.get(CONF_COROS_REGION, DEFAULT_COROS_REGION),
+            )
+            try:
+                await source.async_authenticate()
+            except WorkoutSourceAuthError:
+                errors["base"] = "invalid_auth"
+            except WorkoutSourceError:
+                errors["base"] = "cannot_connect"
+            except Exception:
+                _LOGGER.exception("Unexpected error validating Coros credentials during reauth")
+                errors["base"] = "unknown"
+            else:
+                return self.async_update_reload_and_abort(
+                    self._get_reauth_entry(),
+                    data_updates={CONF_PASSWORD: password},
+                )
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=_STEP_COROS_REAUTH_SCHEMA,
+            errors=errors,
+            description_placeholders={
+                "source_name": f"Coros ({self._reauth_entry_data[CONF_EMAIL]})",
+            },
         )
 
     # --- Apple Health: no auth, just generate & display a webhook URL ------

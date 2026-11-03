@@ -56,6 +56,15 @@
       "apple_health": {
         "title": "Connect Apple Health",
         "description": "Apple doesn't offer a cloud API for Health data, so this works by receiving workouts pushed from your iPhone instead of pulling them — there's no historical import, only workouts recorded from now on.\n\n**Your webhook URL:**\n`{webhook_url}`\n\nSet up an iOS Shortcut to send workouts here:\n\n1. Install {toolbox_pro_url} — stock Shortcuts can't read structured workout data, only raw daily totals, so a Toolbox Pro's **Get Workouts** action is needed to get real per-workout records (type, distance, duration, calories).\n2. Create a new Shortcut: **Get Workouts** → for each result, build a dictionary with keys `id`, `type`, `startDate`, `endDate`, `duration` (minutes), `distance` (with unit, e.g. \"11.4 km\"), `calories` (with unit, e.g. \"724 kcal\") → **Get Contents of URL**, method POST, the URL above, request body = that dictionary as JSON.\n3. Set it to run automatically — e.g. a Shortcuts **Automation** (Time of Day, or when a workout ends) with \"Ask Before Running\" turned off.\n4. Continue below once you're ready — the entity will start reporting once the first workout is pushed."
+      },
+      "reauth_confirm": {
+        "title": "Reconnect {source_name}",
+        "description": "Your {source_name} credentials were rejected and need to be updated for this integration to keep working.",
+        "data": {
+          "garmin_api_key": "Personal API key",
+          "oura_access_token": "Personal Access Token",
+          "password": "Password"
+        }
       }
     },
     "error": {
@@ -70,7 +79,8 @@
       "oauth_scope_missing": "Strava rejected the request with a 403 right after authorizing, with status \"Inactive\" on your API application. As of Strava's June 2026 developer program change, this almost always means the Strava account that owns your API application (at strava.com/settings/api) doesn't have an active paid Strava subscription — API access now requires one. Subscribe on that account, reactivate the app on the API settings page, then try again. (If you do have a subscription and still see this, it can also mean an older, narrower permission grant from a previous attempt was reused — try again and check that all requested permissions are ticked on Strava's consent screen.)",
       "oauth_timeout": "Timed out waiting for Strava's authorization response.",
       "oauth_unauthorized": "Strava rejected the authorization request.",
-      "user_rejected_authorize": "Authorization was cancelled."
+      "user_rejected_authorize": "Authorization was cancelled.",
+      "reauth_successful": "[%key:common::config_flow::abort::reauth_successful%]"
     },
     "create_entry": {
       "default": "Successfully connected."

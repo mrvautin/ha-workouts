@@ -47,6 +47,7 @@ libraries. Notable, easy-to-get-wrong findings from that spec:
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import date, datetime
 from typing import Any
@@ -58,14 +59,20 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from ..models import Activity, ActivityType, DailySummary, WorkoutData
 from .base import (
     WorkoutSource,
-    WorkoutSourceAuthError,
     WorkoutSourceError,
     WorkoutSourceRateLimitedError,
+    WorkoutSourceReauthRequiredError,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _API_BASE = "https://api.ouraring.com/v2"
+
+#: Pause after a network-level failure talking to Oura's API (DNS, timeout,
+#: connection refused — NOT a rejected token or rate limit, both handled
+#: separately) before surfacing the error — see GarminSource/CorosSource's
+#: identical constant/reasoning.
+_NETWORK_ERROR_BACKOFF_SECONDS = 30.0
 
 # Oura's PublicWorkout.activity is a free-text string with no published enum
 # (confirmed via its OpenAPI schema — see module docstring), so this matches
@@ -114,6 +121,17 @@ class OuraSource(WorkoutSource):
     def __init__(self, hass: HomeAssistant, access_token: str) -> None:
         self._hass = hass
         self._access_token = access_token
+        # Set once Oura has rejected this token — there's no session/refresh
+        # concept for a static Personal Access Token at all (see module
+        # docstring), so any rejection means it's genuinely revoked and
+        # needs regenerating. Once True, every subsequent call short-
+        # circuits to re-raising WorkoutSourceReauthRequiredError without
+        # hitting Oura's API again — see GarminSource/CorosSource's
+        # identical flag for why (repeated failed requests against a known-
+        # bad credential, every backfill chunk and every poll). Only reset
+        # by constructing a fresh OuraSource with a new token (i.e. after a
+        # successful reauth).
+        self._reauth_required = False
 
     def _client(self) -> aiohttp.ClientSession:
         return async_get_clientsession(self._hass)
@@ -213,6 +231,15 @@ class OuraSource(WorkoutSource):
     async def _request(
         self, path: str, params: dict[str, Any] | None = None
     ) -> dict[str, Any]:
+        if self._reauth_required:
+            # Already confirmed bad — don't hit Oura's API again until the
+            # user supplies a new token via reauth (see __init__'s
+            # _reauth_required docstring).
+            raise WorkoutSourceReauthRequiredError(
+                "Oura Personal Access Token was previously rejected; "
+                "reauthentication is required"
+            )
+
         try:
             async with self._client().get(
                 f"{_API_BASE}{path}",
@@ -220,7 +247,8 @@ class OuraSource(WorkoutSource):
                 params=params,
             ) as resp:
                 if resp.status == 401:
-                    raise WorkoutSourceAuthError(
+                    self._reauth_required = True
+                    raise WorkoutSourceReauthRequiredError(
                         "Oura Personal Access Token was rejected — it may have been "
                         "revoked. Generate a new token at "
                         "cloud.ouraring.com/personal-access-tokens and reconnect this "
@@ -231,6 +259,11 @@ class OuraSource(WorkoutSource):
                 resp.raise_for_status()
                 return await resp.json()
         except aiohttp.ClientError as err:
+            # Transient connectivity issue, not a bad token — a short pause
+            # keeps a brief network blip from being hammered on every
+            # subsequent chunk fetch in a tight backfill loop (see
+            # CorosSource's identical backoff for the same reasoning).
+            await asyncio.sleep(_NETWORK_ERROR_BACKOFF_SECONDS)
             raise WorkoutSourceError(f"Error communicating with Oura: {err}") from err
 
     def _parse_activity(self, item: dict[str, Any]) -> Activity:

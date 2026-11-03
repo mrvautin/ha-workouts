@@ -78,12 +78,19 @@ from .base import (
     WorkoutSourceAuthError,
     WorkoutSourceError,
     WorkoutSourceRateLimitedError,
+    WorkoutSourceReauthRequiredError,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
 _BASE_URL = "https://personal.connectapi.garmin.com"
 _TOKEN_PATH = "/personalapitoken-service/personal-api/personal-api-key/token"
+
+#: Pause after a network-level failure exchanging the Personal API key (DNS,
+#: timeout, connection refused — NOT a rejected key or rate limit, both
+#: handled separately) before surfacing the error — see CorosSource's
+#: identical constant/reasoning.
+_NETWORK_ERROR_BACKOFF_SECONDS = 30.0
 
 # Garmin's own activity type keys, mapped to our normalized ActivityType.
 _ACTIVITY_TYPE_MAP: dict[str, ActivityType] = {
@@ -260,11 +267,31 @@ class GarminSource(WorkoutSource):
         # expired-token moment during a long backfill could otherwise trigger
         # two concurrent exchanges for no reason.
         self._auth_lock = asyncio.Lock()
+        # Set once Garmin has rejected this API key — unlike Coros's token,
+        # there is no "session expired, a relogin fixes it" case for this key
+        # at all (see module docstring: no refresh token exists), so ANY
+        # rejection means the key itself needs regenerating. Once True, every
+        # subsequent call short-circuits to re-raising
+        # WorkoutSourceReauthRequiredError without hitting Garmin's token
+        # endpoint again — see CorosSource's identical flag for why (repeated
+        # failed exchanges against a known-bad credential, every backfill
+        # chunk and every poll). Only reset by constructing a fresh
+        # GarminSource with a new key (i.e. after a successful reauth).
+        self._reauth_required = False
 
     def _client(self) -> aiohttp.ClientSession:
         return async_get_clientsession(self._hass)
 
     async def async_authenticate(self) -> None:
+        if self._reauth_required:
+            # Already confirmed bad — don't hit Garmin's token endpoint again
+            # until the user supplies a new key via reauth (see __init__'s
+            # _reauth_required docstring).
+            raise WorkoutSourceReauthRequiredError(
+                "Garmin Personal API key was previously rejected; "
+                "reauthentication is required"
+            )
+
         async with self._auth_lock:
             if self._access_token is not None:
                 # Another caller already re-authenticated while we were waiting.
@@ -282,7 +309,13 @@ class GarminSource(WorkoutSource):
                 headers={"Accept": "*/*", "Authorization": f"ApiKey {self._api_key}"},
             ) as resp:
                 if resp.status == 401:
-                    raise WorkoutSourceAuthError(
+                    # Unlike the bearer token (which simply re-exchanges on
+                    # expiry — see _request below), the underlying API key
+                    # itself has no refresh mechanism at all (see module
+                    # docstring): any rejection here means it's genuinely
+                    # expired/revoked and needs regenerating.
+                    self._reauth_required = True
+                    raise WorkoutSourceReauthRequiredError(
                         "Garmin Personal API key was rejected — it may have expired or been "
                         "revoked. Generate a new key at Garmin Connect's Personal API Key "
                         "settings page and reconnect this integration."
@@ -294,6 +327,11 @@ class GarminSource(WorkoutSource):
                 # confirmed against Garmin's own official sample client.
                 token = (await resp.text()).strip()
         except aiohttp.ClientError as err:
+            # Transient connectivity issue, not a bad key — a short pause
+            # keeps a brief network blip from being hammered on every
+            # subsequent chunk fetch in a tight backfill loop (see
+            # CorosSource's identical backoff for the same reasoning).
+            await asyncio.sleep(_NETWORK_ERROR_BACKOFF_SECONDS)
             raise WorkoutSourceError(f"Could not connect to Garmin Personal API: {err}") from err
 
         if not token:
@@ -332,7 +370,13 @@ class GarminSource(WorkoutSource):
                         await self._async_exchange_token()
                         continue
                     if resp.status == 401:
-                        raise WorkoutSourceAuthError(
+                        # The key exchange above succeeded (got a fresh
+                        # bearer token) but the API call was still rejected
+                        # — not the normal "bearer token simply expired"
+                        # case (that's already handled by the retry above),
+                        # so there's nothing a plain retry can fix here.
+                        self._reauth_required = True
+                        raise WorkoutSourceReauthRequiredError(
                             "Garmin Personal API rejected the request even after refreshing "
                             "the token — the underlying API key has likely expired."
                         )
@@ -368,7 +412,10 @@ class GarminSource(WorkoutSource):
                         await self._async_exchange_token()
                         continue
                     if resp.status == 401:
-                        raise WorkoutSourceAuthError(
+                        # See _request's identical case above for why this
+                        # is reauth-worthy, not a plain retry-later error.
+                        self._reauth_required = True
+                        raise WorkoutSourceReauthRequiredError(
                             "Garmin Personal API rejected the request even after refreshing "
                             "the token — the underlying API key has likely expired."
                         )
