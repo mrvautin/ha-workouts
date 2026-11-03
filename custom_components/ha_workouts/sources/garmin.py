@@ -425,7 +425,12 @@ class GarminSource(WorkoutSource):
         fit_zip_bytes = await self._download_fit(source_id)
         if fit_zip_bytes is None:
             return []
-        return _parse_splits_from_fit(fit_zip_bytes)
+        # Decompression + pure-Python FIT parsing of a full activity file is
+        # enough CPU work to stall the event loop for every other
+        # integration while it runs — this fires on every poll that sees a
+        # new activity, and once per activity during the splits backfill, so
+        # it needs to run off the event loop rather than inline.
+        return await self._hass.async_add_executor_job(_parse_splits_from_fit, fit_zip_bytes)
 
     async def async_fetch_activities_range(
         self, start_day: date, end_day: date
