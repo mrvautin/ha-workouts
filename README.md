@@ -443,12 +443,15 @@ short window (e.g. a large history backfill combined with other activity).
 Home Assistant retries automatically with increasing backoff; it typically
 clears within 30–60 minutes of being left alone.
 
-**Garmin: "Garmin Personal API key was rejected" / authentication failed** —
-the Personal API key has expired or was deleted/regenerated in Garmin
-Connect. Generate a new key (see [Garmin setup](#garmin-setup) above),
-remove this integration's Garmin entry, and re-add it with the new key —
-there's no way to update a key in place, since Garmin's Personal API has no
-refresh-token mechanism to renew it automatically.
+**Garmin/Oura/Coros: a "Reauthenticate" notification appears, or the entry
+shows as needing attention under Devices & Services** — the stored
+credential was rejected (an expired/revoked Garmin API key or Oura token, or
+a genuinely wrong Coros password — not the normal "someone else logged into
+the Coros app" case, which self-heals automatically). Click the
+notification, or open the integration and click **Reconfigure**, and enter
+a fresh credential — see [Garmin setup](#garmin-setup) / [Oura
+setup](#oura-setup-beta) / [Coros setup](#coros-setup) for where to get a
+new one. No need to remove and re-add the entry.
 
 **Coros: "Coros session expired or was invalidated" repeatedly** — most
 often means you (or another device/app) logged into the Coros app or

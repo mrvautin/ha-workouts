@@ -9,7 +9,40 @@ from ..models import Activity, WorkoutData
 
 
 class WorkoutSourceAuthError(Exception):
-    """Raised when authentication with the source fails (bad credentials, expired session)."""
+    """Raised when authentication with the source fails (bad credentials, expired session).
+
+    Covers both a transient, self-recoverable case (e.g. Coros's session was
+    silently invalidated because the user logged into the Coros app
+    elsewhere — the next call just logs back in automatically) AND a genuine
+    "the user needs to do something" case. Callers that need to tell these
+    apart (coordinator.py, to decide between a plain retry-later UpdateFailed
+    vs. triggering Home Assistant's reauth flow) should catch
+    WorkoutSourceReauthRequiredError specifically — it's a subclass, so
+    existing code that only catches this base class still sees it.
+    """
+
+
+class WorkoutSourceReauthRequiredError(WorkoutSourceAuthError):
+    """Raised specifically when stored credentials are confirmed bad/expired/
+    revoked and the only fix is the user supplying new ones — as opposed to
+    WorkoutSourceAuthError's broader "something about auth failed right now"
+    (which may just mean "log in again automatically and retry").
+
+    Sources should raise this (not the plain WorkoutSourceAuthError) when:
+    - A login attempt is rejected outright for bad credentials (not merely an
+      expired SESSION that a fresh login would silently fix).
+    - A static token/API key (Garmin's Personal API key, Oura's Personal
+      Access Token) is rejected — these have no concept of "session expiry
+      that a relogin fixes"; a rejection always means the credential itself
+      needs regenerating.
+
+    coordinator.py maps this to Home Assistant's ConfigEntryAuthFailed, which
+    triggers a reauth flow (see config_flow.py's async_step_reauth) instead
+    of silently retrying forever on the normal poll schedule — repeatedly
+    resubmitting known-bad credentials to a source's login endpoint risks
+    that account getting locked out, and leaves the user with no indication
+    anything needs fixing beyond a permanently-unavailable entity.
+    """
 
 
 class WorkoutSourceError(Exception):

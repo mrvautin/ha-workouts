@@ -65,6 +65,7 @@ from .base import (
     WorkoutSourceAuthError,
     WorkoutSourceError,
     WorkoutSourceRateLimitedError,
+    WorkoutSourceReauthRequiredError,
 )
 from .coros_mcp import CorosMcpClient, McpTokenSet
 
@@ -75,6 +76,14 @@ _LOGGER = logging.getLogger(__name__)
 #: grow this without limit; only the most recent handful are ever useful for
 #: troubleshooting a live wording/format change.
 _MCP_DEBUG_LOG_MAXLEN = 20
+
+#: Pause after a network-level failure talking to Coros's login endpoint
+#: (DNS, timeout, connection refused — NOT a rejected login or rate limit,
+#: both handled separately) before surfacing the error. A brief outage
+#: shouldn't be retried instantly on every subsequent chunk fetch in a tight
+#: backfill loop; this is a single pause before raising, not a retry loop
+#: (the caller's own next attempt effectively retries it).
+_NETWORK_ERROR_BACKOFF_SECONDS = 30.0
 
 #: Login succeeds against any region's host, but the returned token is only
 #: accepted by that SAME region's host for every later call — see module
@@ -183,6 +192,18 @@ class CorosSource(WorkoutSource):
         # logins must be serialized rather than each independently racing
         # Coros's login endpoint.
         self._auth_lock = asyncio.Lock()
+        # Set once Coros has explicitly rejected these credentials (see
+        # async_authenticate's "result != 0000" case) — once True, every
+        # subsequent call short-circuits straight to re-raising
+        # WorkoutSourceReauthRequiredError WITHOUT hitting the login endpoint
+        # again. Without this, a long-running backfill (which calls
+        # _async_ensure_authenticated once per chunk fetch) or repeated
+        # coordinator polls across restarts would keep resubmitting the same
+        # known-bad password to Coros's login endpoint indefinitely — a real
+        # risk of the account getting locked out for repeated failed logins.
+        # Only reset by constructing a fresh CorosSource with new credentials
+        # (i.e. after a successful reauth, which reloads the config entry).
+        self._reauth_required = False
 
         # MCP (see sources/coros_mcp.py) is an entirely separate, OPTIONAL
         # connection — mcp_tokens is None whenever the user hasn't connected
@@ -209,6 +230,14 @@ class CorosSource(WorkoutSource):
         return async_get_clientsession(self._hass)
 
     async def async_authenticate(self) -> None:
+        if self._reauth_required:
+            # Already confirmed bad — don't hit Coros's login endpoint again
+            # until the user supplies new credentials via reauth (see
+            # __init__'s _reauth_required docstring).
+            raise WorkoutSourceReauthRequiredError(
+                "Coros login was previously rejected; reauthentication is required"
+            )
+
         async with self._auth_lock:
             if self._access_token is not None:
                 # Another caller already re-authenticated while we were waiting.
@@ -229,11 +258,27 @@ class CorosSource(WorkoutSource):
                     resp.raise_for_status()
                     raw = await resp.text()
             except aiohttp.ClientError as err:
+                # Transient connectivity issue, not bad credentials — a short
+                # pause here (rather than raising immediately) keeps a brief
+                # network blip from being hammered on every subsequent chunk
+                # fetch in a tight backfill loop. Deliberately NOT retried in
+                # a loop here (unlike statistics_import.py's rate-limit
+                # backoff) — this is a single pause before surfacing the
+                # error, not a retry; the caller's own next attempt (next
+                # backfill chunk, or next poll) effectively retries it.
+                await asyncio.sleep(_NETWORK_ERROR_BACKOFF_SECONDS)
                 raise WorkoutSourceError(f"Could not connect to Coros: {err}") from err
             body = _decode_json(raw, "/account/login")
 
             if body.get("result") != "0000":
-                raise WorkoutSourceAuthError(
+                # Login itself rejected the credentials — NOT the "session
+                # silently invalidated mid-use" case _request below handles
+                # (that one keeps the plain WorkoutSourceAuthError, which
+                # coordinator.py treats as safe to auto-retry). This is
+                # "these credentials don't work," confirmed at the one place
+                # that actually attempts a fresh login with them.
+                self._reauth_required = True
+                raise WorkoutSourceReauthRequiredError(
                     f"Invalid Coros email or password (result={body.get('result')}, "
                     f"message={body.get('message')})"
                 )

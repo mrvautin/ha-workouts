@@ -6,7 +6,7 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 
-from homeassistant.config_entries import ConfigEntry
+from homeassistant.config_entries import ConfigEntry, ConfigEntryAuthFailed
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -16,7 +16,12 @@ from .backfill_progress import BackfillProgress
 from .const import CONSISTENCY_CHECK_INTERVAL, DEFAULT_UPDATE_INTERVAL, DOMAIN
 from .models import WorkoutData
 from .personal_bests import async_update_personal_bests
-from .sources.base import WorkoutSource, WorkoutSourceAuthError, WorkoutSourceError
+from .sources.base import (
+    WorkoutSource,
+    WorkoutSourceAuthError,
+    WorkoutSourceError,
+    WorkoutSourceReauthRequiredError,
+)
 from .statistics_import import async_check_statistics_consistency
 
 _LOGGER = logging.getLogger(__name__)
@@ -77,6 +82,15 @@ class WorkoutDataUpdateCoordinator(DataUpdateCoordinator[WorkoutData]):
         async with self.request_lock:
             try:
                 data = await self.source.async_fetch(dt_util.now().date())
+            except WorkoutSourceReauthRequiredError as err:
+                # Confirmed-bad credentials (not a normal expired-session
+                # blip a relogin would silently fix) — raising
+                # ConfigEntryAuthFailed (rather than UpdateFailed) tells HA to
+                # stop silently retrying this on the regular poll schedule
+                # and start a reauth flow instead (see this exception's own
+                # docstring in sources/base.py, and config_flow.py's
+                # async_step_reauth).
+                raise ConfigEntryAuthFailed(f"Authentication failed: {err}") from err
             except WorkoutSourceAuthError as err:
                 raise UpdateFailed(f"Authentication failed: {err}") from err
             except WorkoutSourceError as err:
