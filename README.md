@@ -56,8 +56,8 @@ each source can be charted separately or side by side.
 
 ## Installation
 
-1. In HACS, add this repository as a custom repository (category:
-   Integration), then install "HA Workouts".
+1. In HACS, search for "HA Workouts" and install it — it's in the default
+   HACS repository, so no custom repository needs adding.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration**, search for
    "HA Workouts".
