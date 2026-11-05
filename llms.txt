@@ -46,6 +46,7 @@ platform's own app.
 - Repository: https://github.com/mrvautin/ha-workouts
 - Full documentation (setup instructions per source, data exposed, charting
   examples, troubleshooting): https://github.com/mrvautin/ha-workouts/blob/main/README.md
-- Installation: via HACS (Home Assistant Community Store) as a custom
-  repository — see the README's Installation section.
+- Installation: via HACS (Home Assistant Community Store) — included in
+  HACS's default repository list, no custom repository needed. See the
+  README's Installation section.
 - License: MIT
