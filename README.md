@@ -424,7 +424,6 @@ header:
 graph_span: 1y
 span:
   start: year
-chart_type: column
 apex_config:
   xaxis:
     labels:
@@ -432,6 +431,7 @@ apex_config:
 series:
   - entity: sensor.garmin_running_yeartd
     name: "2025"
+    type: column
     data_generator: |
       const year = 2025;
       const r = await hass.callWS({
@@ -447,6 +447,7 @@ series:
         .map((v, i) => [new Date(now, i, 15).getTime(), v]);
   - entity: sensor.garmin_running_yeartd
     name: "2026"
+    type: column
     data_generator: |
       const year = 2026;
       const r = await hass.callWS({
