@@ -13,12 +13,14 @@ assistant/MCP client via Home Assistant's own Model Context Protocol Server
 integration — see [Letting an AI assistant query your
 data](#letting-an-ai-assistant-query-your-data-mcp) below.
 
-A free, open-source Home Assistant custom integration, installed via
-[HACS](https://hacs.xyz/). You can add Garmin, Coros, Strava, Oura, Apple
-Health, or any combination — each is a separate config entry with its own
-source-prefixed sensors (`sensor.garmin_*`, `sensor.coros_*`,
-`sensor.strava_*`, `sensor.oura_*`, `sensor.apple_health_*`), so data from
-each source can be charted separately or side by side.
+A free, open-source Home Assistant custom integration, installed from
+Home Assistant's built-in **Marketplace** (2026.11 and later) or
+[HACS](https://hacs.xyz/) (earlier versions). You can add Garmin, Coros,
+Strava, Oura, Apple Health, or any combination — each is a separate config
+entry with its own source-prefixed sensors (`sensor.garmin_*`,
+`sensor.coros_*`, `sensor.strava_*`, `sensor.oura_*`,
+`sensor.apple_health_*`), so data from each source can be charted separately
+or side by side.
 
 ## Supported sources
 
@@ -56,8 +58,17 @@ each source can be charted separately or side by side.
 
 ## Installation
 
-1. In HACS, search for "HA Workouts" and install it — it's in the default
-   HACS repository, so no custom repository needs adding.
+1. Install "HA Workouts":
+   - **Home Assistant 2026.11 or later:** go to **Settings → Marketplace**,
+     search for "HA Workouts" and install it. The first time, you'll be
+     asked to accept the Marketplace's risk notice.
+   - **Earlier versions:** in HACS, search for "HA Workouts" and install
+     it. It's in the default HACS repository, so no custom repository needs
+     adding.
+
+   Already installed through HACS? Upgrading Home Assistant to 2026.11 moves
+   it into the Marketplace automatically, with updates carrying on as
+   before.
 2. Restart Home Assistant.
 3. Go to **Settings → Devices & Services → Add Integration**, search for
    "HA Workouts".
@@ -411,10 +422,10 @@ years:
 Months that haven't happened yet are `null`, so charts stop at today.
 
 Built-in Home Assistant cards can't call an action, so use
-[ApexCharts Card](https://github.com/RomRider/apexcharts-card) (install it
-from HACS). Each series calls the action and places its 12 values on this
-year's months, so the years line up as grouped bars. Change `garmin`,
-`running` and the years to suit:
+[ApexCharts Card](https://github.com/RomRider/apexcharts-card). Install it
+from **Settings → Marketplace** (or HACS before 2026.11). Each series calls
+the action and places its 12 values on this year's months, so the years line
+up as grouped bars. Change `garmin`, `running` and the years to suit:
 
 ```yaml
 type: custom:apexcharts-card
