@@ -291,9 +291,9 @@ Setting up the data (make sure all fields are `Text`)
   `sensor.strava_cycling_duration_minutes`,
   `sensor.apple_health_running_distance_km`: a lifetime-cumulative running
   total (like an odometer, not "today's total") for distance/duration/calories
-  per activity type. Charting day/week/month/year totals from this is what
-  the examples below show — the cumulative value itself isn't meant to be
-  read directly.
+  per activity type. Its chart history lives in a matching statistic (see
+  [Charting your data](#charting-your-data)) — the cumulative value itself
+  isn't meant to be read directly.
 - **Last activity**: name, type, duration of your most recent workout.
   Garmin also gets running-form, power, and training-load detail for the
   most recent activity: running/cycling cadence, power (average, max,
@@ -345,8 +345,15 @@ just sensors like any other.
 
 ## Charting your data
 
-All charting below uses Home Assistant's built-in **Statistics Graph** and
-**Statistics** cards — no custom card or YAML template required.
+Most charts below use Home Assistant's built-in **Statistics Graph** and
+**Statistic** cards. Comparing one year's months against another's needs the
+community [ApexCharts Card](https://github.com/RomRider/apexcharts-card).
+
+**Pick the statistic, not the sensor.** Each per-activity-type sensor's
+history is stored in a statistic named after its source, e.g. **Garmin
+running distance km** (`ha_workouts:garmin_running_distance_km`). In the card
+editor, pick that statistic. The `sensor.garmin_running_distance_km` entity
+only shows the live running total and has no chart history of its own.
 
 ### Monthly running distance (bar chart)
 
@@ -354,51 +361,190 @@ All charting below uses Home Assistant's built-in **Statistics Graph** and
 
 1. Edit a dashboard → **+ Add Card** → search **"Statistics Graph"**.
 2. Set:
-   - **Entities**: `sensor.garmin_running_distance_km`
+   - **Statistics**: Garmin running distance km
+     (`ha_workouts:garmin_running_distance_km`)
    - **Period**: Month
    - **Stat type**: Change
    - **Graph type**: Bar
 3. Save.
 
-"Change" is what turns the cumulative sensor into a per-period bar chart —
-it's the difference between consecutive period boundaries, not the raw
+"Change" is what turns the cumulative total into a per-period bar chart.
+It's the difference between consecutive period boundaries, not the raw
 running total. This also works with `_duration_minutes` or `_calories`, and
 with `Period: Day` or `Period: Week` for finer granularity.
 
 ### Running distance, year to date
 
-1. Edit a dashboard → **+ Add Card** → search **"Statistics"** (the
-   single-value stat card, not "Statistics Graph").
-2. Set:
-   - **Entity**: `sensor.garmin_running_distance_km`
-   - **Period**: Year
-   - **Stat type**: Change
-3. Save. This shows how far you've run since Jan 1 of the current year,
-   updating live as new activities come in.
+Use the `sensor.garmin_running_yeartd` sensor (also `_weektd` and
+`_monthtd`). It's calculated straight from your activities and resets at the
+start of each year. Show it with an **Entity** or **Tile** card.
 
 ### Comparing two sources, or two activity types
 
-Add multiple entities to one Statistics Graph card — e.g.
-`sensor.garmin_running_distance_km` and `sensor.apple_health_running_distance_km`
-(if you use both), or `sensor.garmin_running_distance_km` and
-`sensor.garmin_cycling_distance_km` — to overlay them on the same chart.
+Add multiple statistics to one Statistics Graph card, e.g. Garmin running
+distance km and Apple Health running distance km (if you use both), or
+Garmin running distance km and Garmin cycling distance km, to overlay them
+on the same chart.
 
-### This year vs last year
+### This year vs last year, month by month
 
-The built-in **Statistic** card (not Statistics Graph) can show a single
-period's change with an offset, so two of these side by side gives an honest
-year-over-year comparison with no setup beyond picking the entity:
+The `ha_workouts.get_monthly_totals` action returns 12 monthly totals for
+each year you ask for, calculated from your stored activities. Try it in
+**Developer Tools → Actions**:
 
-- Card 1 — **Entity**: `sensor.garmin_running_distance_km`, **Period**:
-  Year, **Stat type**: Change (this is the current year)
-- Card 2 — same entity, **Period**: Year, **Offset**: -1 (last year)
+```yaml
+action: ha_workouts.get_monthly_totals
+data:
+  source: garmin            # garmin, strava, coros or apple_health
+  activity_type: running
+  metric: distance_km       # distance_km, duration_minutes, calories or activity_count
+  years: [2025, 2026]       # optional, defaults to last year and this year
+```
 
-For an actual overlaid chart of this year's line against last year's, Home
-Assistant's built-in Statistics Graph card doesn't support two independent
-time ranges on one chart — both entities always share the same window. The
-popular community card [ApexCharts
-Card](https://github.com/RomRider/apexcharts-card) (via HACS) does support
-this.
+```yaml
+unit: km
+years:
+  "2025": [42.1, 38.5, 51.0, 47.3, 55.2, 60.8, 58.4, 49.9, 44.0, 52.7, 40.3, 36.6]
+  "2026": [45.3, 41.0, 57.2, 50.1, 61.4, 63.0, 59.8, 54.2, 48.7, 55.1, 12.4, null]
+```
+
+Months that haven't happened yet are `null`, so charts stop at today.
+
+Built-in Home Assistant cards can't call an action, so use
+[ApexCharts Card](https://github.com/RomRider/apexcharts-card) (install it
+from HACS). Each series calls the action and places its 12 values on this
+year's months, so the years line up as grouped bars. Change `garmin`,
+`running` and the years to suit:
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Running km by month
+graph_span: 1y
+span:
+  start: year
+apex_config:
+  xaxis:
+    labels:
+      format: MMM
+series:
+  - entity: sensor.garmin_running_yeartd
+    name: "2025"
+    type: column
+    data_generator: |
+      const year = 2025;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date().getFullYear();
+      return r.response.years[year]
+        .map((v, i) => [new Date(now, i, 15).getTime(), v]);
+  - entity: sensor.garmin_running_yeartd
+    name: "2026"
+    type: column
+    data_generator: |
+      const year = 2026;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date().getFullYear();
+      return r.response.years[year]
+        .map((v, i) => [new Date(now, i, 15).getTime(), v]);
+```
+
+The `entity:` line is only there because ApexCharts requires one; any
+`ha_workouts` sensor works.
+
+### Running total through the year, this year vs last year
+
+The same action can show how your distance builds up over the year: one
+line per year, starting at 0 on 1 January and climbing month by month. Each
+point is the running total at the end of that month (or today, for the
+current month), so you can see whether you're ahead of or behind last year.
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Running km, year to date
+graph_span: 1y
+span:
+  start: year
+apex_config:
+  xaxis:
+    labels:
+      format: MMM
+  yaxis:
+    min: 0
+series:
+  - entity: sensor.garmin_running_yeartd
+    name: "2025"
+    type: line
+    stroke_width: 3
+    data_generator: |
+      const year = 2025;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const points = [[new Date(thisYear, 0, 1).getTime(), 0]];
+      let total = 0;
+      r.response.years[year].forEach((km, month) => {
+        if (km === null) return;
+        total += km;
+        const monthEnd = new Date(thisYear, month + 1, 1).getTime();
+        const t = year === thisYear ? Math.min(monthEnd, now.getTime()) : monthEnd;
+        points.push([t, Math.round(total * 100) / 100]);
+      });
+      return points;
+  - entity: sensor.garmin_running_yeartd
+    name: "2026"
+    type: line
+    stroke_width: 3
+    data_generator: |
+      const year = 2026;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const points = [[new Date(thisYear, 0, 1).getTime(), 0]];
+      let total = 0;
+      r.response.years[year].forEach((km, month) => {
+        if (km === null) return;
+        total += km;
+        const monthEnd = new Date(thisYear, month + 1, 1).getTime();
+        const t = year === thisYear ? Math.min(monthEnd, now.getTime()) : monthEnd;
+        points.push([t, Math.round(total * 100) / 100]);
+      });
+      return points;
+```
+
+As in the bar chart, both years are drawn on this year's dates so the lines
+sit on top of each other. Last year's line runs to December; this year's
+stops at today.
 
 ## History backfill
 
