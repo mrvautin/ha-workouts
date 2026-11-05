@@ -350,6 +350,8 @@ All charting below uses Home Assistant's built-in **Statistics Graph** and
 
 ### Monthly running distance (bar chart)
 
+![Monthly running distance bar chart](images/monthly-chart.png)
+
 1. Edit a dashboard → **+ Add Card** → search **"Statistics Graph"**.
 2. Set:
    - **Entities**: `sensor.garmin_running_distance_km`
@@ -381,14 +383,22 @@ Add multiple entities to one Statistics Graph card — e.g.
 (if you use both), or `sensor.garmin_running_distance_km` and
 `sensor.garmin_cycling_distance_km` — to overlay them on the same chart.
 
-### Comparing this year to last year
+### This year vs last year
 
-Home Assistant's Statistics Graph card doesn't natively overlay two
-different year ranges on one chart. The simplest working approach: add two
-Statistics Graph cards to the same dashboard view, one showing `Period:
-Month` for the current year and one for the previous year (use the card's
-date-range picker to pin each to its respective year), stacked so you can
-compare them side by side.
+The built-in **Statistic** card (not Statistics Graph) can show a single
+period's change with an offset, so two of these side by side gives an honest
+year-over-year comparison with no setup beyond picking the entity:
+
+- Card 1 — **Entity**: `sensor.garmin_running_distance_km`, **Period**:
+  Year, **Stat type**: Change (this is the current year)
+- Card 2 — same entity, **Period**: Year, **Offset**: -1 (last year)
+
+For an actual overlaid chart of this year's line against last year's, Home
+Assistant's built-in Statistics Graph card doesn't support two independent
+time ranges on one chart — both entities always share the same window. The
+popular community card [ApexCharts
+Card](https://github.com/RomRider/apexcharts-card) (via HACS) does support
+this.
 
 ## History backfill
 
