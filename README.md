@@ -31,11 +31,11 @@ each source can be charted separately or side by side.
   fitness assessment/training load (see [Coros setup](#coros-setup) below).
 - **Strava** — OAuth2, using your own Strava API application (see [Strava
   setup](#strava-setup) below). **As of Strava's June 2026 developer program
-  change, this requires an active paid Strava subscription ($11.99/mo) on the
-  account that owns the API application** — this is Strava's policy, not
-  something this integration can work around. Without a subscription, Strava
-  marks the application "Inactive" and rejects requests with a 403 error even
-  after a successful sign-in.
+  change, this requires an active paid Strava subscription (e.g. US$11.99/mo
+  or A$14.99/mo) on the account that owns the API application** — this is
+  Strava's policy, not something this integration can work around. Without a
+  subscription, Strava marks the application "Inactive" and rejects requests
+  with a 403 error even after a successful sign-in.
 - **Oura** (**beta** — not yet tested against a real account, see [Oura
   setup](#oura-setup-beta) below) — a self-serve Personal Access Token you
   generate yourself in your Oura account's own settings (no developer
