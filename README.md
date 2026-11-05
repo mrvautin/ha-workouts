@@ -31,8 +31,8 @@ each source can be charted separately or side by side.
   fitness assessment/training load (see [Coros setup](#coros-setup) below).
 - **Strava** — OAuth2, using your own Strava API application (see [Strava
   setup](#strava-setup) below). **As of Strava's June 2026 developer program
-  change, this requires an active paid Strava subscription (e.g. US$11.99/mo
-  or A$14.99/mo) on the account that owns the API application** — this is
+  change, this requires an active paid Strava subscription (e.g. USD$11.99/mo
+  or AUD$14.99/mo) on the account that owns the API application** — this is
   Strava's policy, not something this integration can work around. Without a
   subscription, Strava marks the application "Inactive" and rejects requests
   with a 403 error even after a successful sign-in.
@@ -157,7 +157,7 @@ this integration provides:
 - `sensor.coros_training_load_short_term`, `sensor.coros_training_load_long_term`
 - `sensor.coros_threshold_pace`
 
-**Note on what's *not* included:** Coros's own phone app shows a VO2max
+**Note on what's _not_ included:** Coros's own phone app shows a VO2max
 estimate and race-time predictions (5K/10K/half/full marathon) under
 "Running Fitness." As of this integration's testing, Coros's own official
 API doesn't return those specific figures yet, even though the app clearly
