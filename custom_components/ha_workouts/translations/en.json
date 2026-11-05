@@ -278,5 +278,59 @@
         "name": "{activity_type} activities"
       }
     }
+  },
+  "selector": {
+    "source": {
+      "options": {
+        "garmin": "Garmin",
+        "strava": "Strava",
+        "coros": "Coros",
+        "apple_health": "Apple Health"
+      }
+    },
+    "activity_type": {
+      "options": {
+        "running": "Running",
+        "cycling": "Cycling",
+        "swimming": "Swimming",
+        "walking": "Walking",
+        "strength_training": "Strength training",
+        "hiking": "Hiking",
+        "yoga": "Yoga",
+        "other": "Other"
+      }
+    },
+    "metric": {
+      "options": {
+        "distance_km": "Distance (km)",
+        "duration_minutes": "Duration (minutes)",
+        "calories": "Calories",
+        "activity_count": "Number of activities"
+      }
+    }
+  },
+  "services": {
+    "get_monthly_totals": {
+      "name": "Get monthly totals",
+      "description": "Returns 12 monthly totals for each requested year, calculated from the stored activity history. Used by chart cards to compare one year's months against another's.",
+      "fields": {
+        "source": {
+          "name": "Source",
+          "description": "Which connected source's activities to use."
+        },
+        "activity_type": {
+          "name": "Activity type",
+          "description": "Which kind of activity to total."
+        },
+        "metric": {
+          "name": "Metric",
+          "description": "What to total for each month."
+        },
+        "years": {
+          "name": "Years",
+          "description": "List of years to return, e.g. [2025, 2026]. Up to 5. Defaults to last year and this year."
+        }
+      }
+    }
   }
 }

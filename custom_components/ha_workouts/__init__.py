@@ -10,13 +10,24 @@ from __future__ import annotations
 
 import logging
 
+import voluptuous as vol
 from aiohttp import web
 from homeassistant.components import webhook
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import CONF_EMAIL, CONF_PASSWORD, Platform
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import (
+    HomeAssistant,
+    ServiceCall,
+    ServiceResponse,
+    SupportsResponse,
+    callback,
+)
+from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_entry_oauth2_flow
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.typing import ConfigType
+from homeassistant.util import dt as dt_util
 
 from .const import (
     CONF_COROS_MCP_ACCESS_TOKEN,
@@ -35,8 +46,11 @@ from .const import (
     SOURCE_GARMIN,
     SOURCE_OURA,
     SOURCE_STRAVA,
+    SOURCE_TYPES,
 )
 from .coordinator import WorkoutDataUpdateCoordinator
+from .models import ActivityType
+from .period_sensors import MONTHLY_METRICS, async_get_monthly_totals
 from .sources.apple_health import AppleHealthSource
 from .sources.base import WorkoutSource
 from .sources.coros import CorosSource
@@ -91,6 +105,62 @@ def _mcp_tokens_from_entry(entry: ConfigEntry) -> McpTokenSet | None:
         expires_at_epoch=entry.data[CONF_COROS_MCP_EXPIRES_AT],
         client_id=entry.data[CONF_COROS_MCP_CLIENT_ID],
     )
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
+SERVICE_GET_MONTHLY_TOTALS = "get_monthly_totals"
+MAX_YEARS_PER_REQUEST = 5
+
+GET_MONTHLY_TOTALS_SCHEMA = vol.Schema(
+    {
+        vol.Required("source"): vol.In(SOURCE_TYPES),
+        vol.Required("activity_type"): vol.In([t.value for t in ActivityType]),
+        vol.Optional("metric", default="distance_km"): vol.In(list(MONTHLY_METRICS)),
+        vol.Optional("years"): vol.All(
+            cv.ensure_list,
+            [vol.All(vol.Coerce(int), vol.Range(min=1970, max=2100))],
+            vol.Length(min=1, max=MAX_YEARS_PER_REQUEST),
+        ),
+    }
+)
+
+
+async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
+    """Register integration-wide actions (once, not per config entry)."""
+
+    async def _handle_get_monthly_totals(call: ServiceCall) -> ServiceResponse:
+        source = call.data["source"]
+        if not any(
+            entry.data.get(CONF_SOURCE_TYPE) == source
+            for entry in hass.config_entries.async_loaded_entries(DOMAIN)
+        ):
+            raise ServiceValidationError(
+                f"No loaded ha_workouts entry for source '{source}'"
+            )
+        today = dt_util.now().date()
+        years = call.data.get("years") or [today.year - 1, today.year]
+        metric = call.data["metric"]
+        totals = await async_get_monthly_totals(
+            hass,
+            # The activity log is keyed by the source type (the same string as
+            # the source's .key, which sensor.py uses as entry_slug).
+            source,
+            ActivityType(call.data["activity_type"]),
+            metric,
+            years,
+            today,
+        )
+        return {"unit": MONTHLY_METRICS[metric], "years": totals}
+
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_GET_MONTHLY_TOTALS,
+        _handle_get_monthly_totals,
+        schema=GET_MONTHLY_TOTALS_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    return True
 
 
 @callback

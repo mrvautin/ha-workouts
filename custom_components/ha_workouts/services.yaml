@@ -1,0 +1,42 @@
+get_monthly_totals:
+  fields:
+    source:
+      required: true
+      example: garmin
+      selector:
+        select:
+          translation_key: source
+          options:
+            - garmin
+            - strava
+            - coros
+            - apple_health
+    activity_type:
+      required: true
+      example: running
+      selector:
+        select:
+          translation_key: activity_type
+          options:
+            - running
+            - cycling
+            - swimming
+            - walking
+            - strength_training
+            - hiking
+            - yoga
+            - other
+    metric:
+      default: distance_km
+      selector:
+        select:
+          translation_key: metric
+          options:
+            - distance_km
+            - duration_minutes
+            - calories
+            - activity_count
+    years:
+      example: "[2025, 2026]"
+      selector:
+        object:

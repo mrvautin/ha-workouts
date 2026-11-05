@@ -735,10 +735,21 @@ def _build_metric_metadata(
     statistic_id: str, activity_type: ActivityType, metric: str
 ) -> StatisticMetaData:
     unit, unit_class = _METRIC_UNITS[metric]
+    # Lead the name with the source (e.g. "Garmin running distance km"), so
+    # each source's statistic can be told apart in the Statistics Graph
+    # card's picker. statistic_id is always built by statistic_id_slug, so
+    # stripping its known prefix and suffix gives back the entry_slug exactly.
+    entry_slug = statistic_id.removeprefix(f"{DOMAIN}:").removesuffix(
+        f"_{activity_type.value}_{metric}"
+    )
+    source_name = entry_slug.replace("_", " ").title()
     return StatisticMetaData(
         mean_type=StatisticMeanType.NONE,
         has_sum=True,
-        name=f"{activity_type.value.replace('_', ' ').title()} {metric.replace('_', ' ')}",
+        name=(
+            f"{source_name} {activity_type.value.replace('_', ' ')} "
+            f"{metric.replace('_', ' ')}"
+        ),
         source=DOMAIN,
         statistic_id=statistic_id,
         unit_class=unit_class,

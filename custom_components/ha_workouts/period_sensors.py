@@ -79,3 +79,54 @@ async def async_get_period_totals(
     activities = await async_get_activities_in_range(hass, entry_slug, start_day, today)
     matching = [a for a in activities if a.activity_type == activity_type]
     return _sum_activities(matching)
+
+
+MONTHLY_METRICS: dict[str, str | None] = {
+    "distance_km": "km",
+    "duration_minutes": "min",
+    "calories": "kcal",
+    "activity_count": None,
+}
+
+
+async def async_get_monthly_totals(
+    hass: HomeAssistant,
+    entry_slug: str,
+    activity_type: ActivityType,
+    metric: str,
+    years: list[int],
+    today: date,
+) -> dict[str, list[float | None]]:
+    """Return 12 monthly totals of `metric` for each year in `years`.
+
+    Backs the ha_workouts.get_monthly_totals action, which chart cards call to
+    plot one year's months against another's. Like the period-to-date sensors
+    above, this reads the activity log directly rather than recorder
+    statistics, and buckets by a.start.date() the same way, so the current
+    year's numbers add up to the _yeartd sensor.
+
+    Months after today's month in the current year are None (not 0), so a
+    chart stops at today instead of drawing empty future months.
+    """
+    start_day = date(min(years), 1, 1)
+    end_day = date(max(years), 12, 31)
+    activities = await async_get_activities_in_range(hass, entry_slug, start_day, end_day)
+
+    buckets: dict[tuple[int, int], list[Activity]] = {}
+    for activity in activities:
+        if activity.activity_type != activity_type:
+            continue
+        day = activity.start.date()
+        buckets.setdefault((day.year, day.month), []).append(activity)
+
+    result: dict[str, list[float | None]] = {}
+    for year in sorted(set(years)):
+        values: list[float | None] = []
+        for month in range(1, 13):
+            if (year, month) > (today.year, today.month):
+                values.append(None)
+                continue
+            totals = _sum_activities(buckets.get((year, month), []))
+            values.append(round(float(getattr(totals, metric)), 2))
+        result[str(year)] = values
+    return result
