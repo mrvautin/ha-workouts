@@ -466,6 +466,86 @@ series:
 The `entity:` line is only there because ApexCharts requires one; any
 `ha_workouts` sensor works.
 
+### Running total through the year, this year vs last year
+
+The same action can show how your distance builds up over the year: one
+line per year, starting at 0 on 1 January and climbing month by month. Each
+point is the running total at the end of that month (or today, for the
+current month), so you can see whether you're ahead of or behind last year.
+
+```yaml
+type: custom:apexcharts-card
+header:
+  show: true
+  title: Running km, year to date
+graph_span: 1y
+span:
+  start: year
+apex_config:
+  xaxis:
+    labels:
+      format: MMM
+  yaxis:
+    min: 0
+series:
+  - entity: sensor.garmin_running_yeartd
+    name: "2025"
+    type: line
+    stroke_width: 3
+    data_generator: |
+      const year = 2025;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const points = [[new Date(thisYear, 0, 1).getTime(), 0]];
+      let total = 0;
+      r.response.years[year].forEach((km, month) => {
+        if (km === null) return;
+        total += km;
+        const monthEnd = new Date(thisYear, month + 1, 1).getTime();
+        const t = year === thisYear ? Math.min(monthEnd, now.getTime()) : monthEnd;
+        points.push([t, Math.round(total * 100) / 100]);
+      });
+      return points;
+  - entity: sensor.garmin_running_yeartd
+    name: "2026"
+    type: line
+    stroke_width: 3
+    data_generator: |
+      const year = 2026;
+      const r = await hass.callWS({
+        type: "call_service",
+        domain: "ha_workouts",
+        service: "get_monthly_totals",
+        service_data: { source: "garmin", activity_type: "running",
+                        metric: "distance_km", years: [year] },
+        return_response: true,
+      });
+      const now = new Date();
+      const thisYear = now.getFullYear();
+      const points = [[new Date(thisYear, 0, 1).getTime(), 0]];
+      let total = 0;
+      r.response.years[year].forEach((km, month) => {
+        if (km === null) return;
+        total += km;
+        const monthEnd = new Date(thisYear, month + 1, 1).getTime();
+        const t = year === thisYear ? Math.min(monthEnd, now.getTime()) : monthEnd;
+        points.push([t, Math.round(total * 100) / 100]);
+      });
+      return points;
+```
+
+As in the bar chart, both years are drawn on this year's dates so the lines
+sit on top of each other. Last year's line runs to December; this year's
+stops at today.
+
 ## History backfill
 
 Applies to Garmin, Coros, and Strava only. Apple Health's existing history
