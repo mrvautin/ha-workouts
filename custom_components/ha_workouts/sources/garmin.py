@@ -100,6 +100,7 @@ _ACTIVITY_TYPE_MAP: dict[str, ActivityType] = {
     "cycling": ActivityType.CYCLING,
     "road_biking": ActivityType.CYCLING,
     "mountain_biking": ActivityType.CYCLING,
+    "e_bike_mountain": ActivityType.CYCLING,
     "lap_swimming": ActivityType.SWIMMING,
     "open_water_swimming": ActivityType.SWIMMING,
     "walking": ActivityType.WALKING,
