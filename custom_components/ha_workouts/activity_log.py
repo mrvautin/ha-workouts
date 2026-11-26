@@ -56,11 +56,19 @@ def _activity_from_dict(data: dict) -> Activity:
     splits = (
         [ActivitySplit(**split) for split in splits_data] if splits_data is not None else None
     )
+    start = datetime.fromisoformat(data["start"])
+    if data["source"] == "strava" and start.tzinfo is not None:
+        # Strava activities saved before the fix for issue #10 carry a bogus
+        # "+00:00" on what is really local wall-clock time. Strip it so they
+        # match newly fetched (naive) ones: mixing the two would make sorting
+        # by start raise TypeError, and the calendar would show them an
+        # offset late.
+        start = start.replace(tzinfo=None)
     return Activity(
         source=data["source"],
         source_id=data["source_id"],
         activity_type=ActivityType(data["activity_type"]),
-        start=datetime.fromisoformat(data["start"]),
+        start=start,
         duration_seconds=data["duration_seconds"],
         distance_meters=data.get("distance_meters"),
         calories=data.get("calories"),
