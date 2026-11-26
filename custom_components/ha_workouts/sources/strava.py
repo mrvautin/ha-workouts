@@ -145,7 +145,13 @@ class StravaSource(WorkoutSource):
             source=self.key,
             source_id=str(item["id"]),
             activity_type=_map_activity_type(item.get("sport_type") or item.get("type")),
-            start=datetime.fromisoformat(item["start_date_local"].replace("Z", "+00:00")),
+            # start_date_local is the athlete's local wall-clock time, but
+            # Strava appends a misleading "Z". Drop it so the result is naive
+            # local time, like every other source's Activity.start, which
+            # calendar.py's as_local() then labels without converting. Keeping
+            # "+00:00" made it convert, adding the UTC offset a second time
+            # (issue #10).
+            start=datetime.fromisoformat(item["start_date_local"].removesuffix("Z")),
             duration_seconds=float(item.get("moving_time") or 0),
             distance_meters=item.get("distance"),
             calories=calories,
